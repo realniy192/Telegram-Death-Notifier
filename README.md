@@ -1,23 +1,42 @@
-# TelegramDeathNotifier
-This is where she makes a mod.
+# Telegram Death Notifier
 
-<img src="logo.png" width="150" alt="the mod's logo" />
+<img src="logo.png" width="150" alt="Telegram Death Notifier logo" />
 
-*Update logo.png to change your mod's icon (please)*
+A Geode mod for Geometry Dash that sends your progress to a **Telegram channel**: death screenshots, startpos runs and level completions. Like Discord death bots, but for Telegram.
 
-## Getting started
-We recommend heading over to [the getting started section on our docs](https://docs.geode-sdk.org/getting-started/) for useful info on what to do next.
+## Features
+- Death screenshots with your percent
+- Startpos runs (e.g. `71-100%`) with separate settings for every startpos
+- Level complete screenshot on the end screen
+- Per-level settings right from the pause menu: enable/disable and minimum percent
+- Noclip support: only the first noclip death counts
+- Practice mode deaths are never sent
+- Custom messages and nickname
 
-## Build instructions
-For more info, see [our docs](https://docs.geode-sdk.org/getting-started/create-mod#build)
+## Setup
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token
+2. Add the bot to your channel as an **admin**
+3. Open the mod settings and paste the bot token and channel (`@name` or `-100...`)
+4. In a level, pause and press the Telegram button to enable the mod for that level
+
+## Message placeholders
+| Placeholder | Meaning |
+|---|---|
+| `{player}` | Your nickname |
+| `{percent}` | Death percent |
+| `{start}` / `{end}` | Run start and end percent |
+| `{level}` | Level name |
+
+## Download
+Grab the latest build from the [Actions](../../actions) tab → latest successful run → **Artifacts**. One `.geode` file works on both Windows and Android.
+
+## Building
 ```sh
-# Assuming you have the Geode CLI set up already
 geode build
 ```
-
-# Resources
-* [Geode SDK Documentation](https://docs.geode-sdk.org/)
-* [Geode SDK Source Code](https://github.com/geode-sdk/geode/)
-* [Geode CLI](https://github.com/geode-sdk/cli)
-* [Bindings](https://github.com/geode-sdk/bindings/)
-* [Dev Tools](https://github.com/geode-sdk/DevTools)
+On Windows, if MSVC crashes while compiling, build with Clang:
+```sh
+geode build -- -T ClangCL
+```
+## Credits
+Made by m3reana with AI assistance (sry...)
