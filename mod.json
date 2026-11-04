@@ -1,0 +1,84 @@
+{
+  "geode": "5.11.2",
+  "gd": { "win": "2.2081", "android": "2.2081", "mac": "2.2081" },
+  "id": "m3reana.tg-death-notifier",
+  "name": "Telegram Death Notifier",
+  "version": "v1.0.0",
+  "developer": "m3reana",
+  "description": "Sends a death screenshot to a Telegram channel",
+  "resources": {
+    "sprites": ["resources/*.png"]
+  },
+  "settings": {
+  "telegram-title": { "type": "title", "name": "Telegram" },
+  "bot-token": {
+    "type": "string",
+    "name": "Bot token",
+    "default": "",
+    "filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_-"
+  },
+  "chat-id": {
+    "type": "string",
+    "name": "Channel (@name or -100...)",
+    "default": "",
+    "filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@_-"
+  },
+
+  "messages-title": {
+    "type": "title",
+    "name": "Messages",
+    "description": "Placeholders: {player}, {percent}, {start}, {end}, {level}"
+  },
+  "msg-death": {
+    "type": "string",
+    "name": "Death message",
+    "description": "Death from 0%. Placeholders: {player}, {percent}, {level}",
+    "default": "{player} died at {percent}% on {level}.",
+    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+  },
+  "msg-run": {
+    "type": "string",
+    "name": "Run message",
+    "description": "Startpos run (death or 100%). Placeholders: {player}, {start}, {end}, {level}",
+    "default": "{player} got a {start}-{end}% run on {level}.",
+    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+  },
+  "msg-beat": {
+    "type": "string",
+    "name": "Level complete message",
+    "description": "Level beaten from 0%. Placeholders: {player}, {level}",
+    "default": "{player} beat {level}!",
+    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+  },
+  "custom-nickname": {
+    "type": "bool",
+    "name": "Use custom nickname",
+    "description": "Use the nickname below instead of your GD username",
+    "default": false
+  },
+  "nickname": {
+    "type": "string",
+    "name": "Nickname",
+    "default": "",
+    "enable-if": "custom-nickname",
+    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+  },
+
+  "extra-title": {
+    "type": "title",
+    "name": "Extra",
+    "description": "Defaults for levels you haven't configured yet"
+  },
+  "default-enabled": { "type": "bool", "name": "Enabled on all levels", "default": false },
+  "default-min": {
+  "type": "int",
+  "name": "Default min percent",
+  "default": 0,
+  "min": 0,
+  "max": 100,
+  "enable-if": "default-enabled",
+  "enable-if-description": "Turn on \"Enabled on all levels\" first"
+},
+  "only-best": { "type": "bool", "name": "Only new bests", "default": false }
+}
+}
