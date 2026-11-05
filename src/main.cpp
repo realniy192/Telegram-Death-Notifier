@@ -106,30 +106,42 @@ static void encodeAndSend(std::shared_ptr<std::vector<uint8_t>> pixels, int w, i
 }
 
 // grab the finished frame right before it is shown on screen
+static void tgCaptureFrame() {
+    if (g_pendingShots.empty()) return;
+    auto captions = std::move(g_pendingShots);
+    g_pendingShots.clear();
+
+    GLint vp[4] = { 0, 0, 0, 0 };
+    glGetIntegerv(GL_VIEWPORT, vp);
+    int x = vp[0], y = vp[1], w = vp[2], h = vp[3];
+    if (w <= 0 || h <= 0) {
+        auto fs = CCDirector::get()->getOpenGLView()->getFrameSize();
+        x = 0; y = 0; w = (int)fs.width; h = (int)fs.height;
+    }
+    if (w <= 0 || h <= 0) return;
+
+    auto pixels = std::make_shared<std::vector<uint8_t>>((size_t)w * h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels->data());
+    for (auto& c : captions) encodeAndSend(pixels, w, h, std::move(c));
+}
+
+#ifdef GEODE_IS_ANDROID
+// on Android the real buffer swap happens in Java after drawScene
+class $modify(TGDirector, CCDirector) {
+    void drawScene() {
+        CCDirector::drawScene();
+        tgCaptureFrame();
+    }
+};
+#else
 class $modify(TGEGLView, CCEGLView) {
     void swapBuffers() {
-        if (!g_pendingShots.empty()) {
-            auto captions = std::move(g_pendingShots);
-            g_pendingShots.clear();
-
-            GLint vp[4] = { 0, 0, 0, 0 };
-            glGetIntegerv(GL_VIEWPORT, vp);
-            int x = vp[0], y = vp[1], w = vp[2], h = vp[3];
-            if (w <= 0 || h <= 0) {
-                auto fs = this->getFrameSize();
-                x = 0; y = 0; w = (int)fs.width; h = (int)fs.height;
-            }
-
-            if (w > 0 && h > 0) {
-                auto pixels = std::make_shared<std::vector<uint8_t>>((size_t)w * h * 4);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels->data());
-                for (auto& c : captions) encodeAndSend(pixels, w, h, std::move(c));
-            }
-        }
+        tgCaptureFrame();
         CCEGLView::swapBuffers();
     }
 };
+#endif
 
 // ask for a screenshot of the current frame
 static void shootAndSend(std::string caption) {
