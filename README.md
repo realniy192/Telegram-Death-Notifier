@@ -28,7 +28,7 @@ A Geode mod for Geometry Dash that sends your progress to a **Telegram channel**
 | `{level}` | Level name |
 
 ## Download
-Download the latest `.geode` from [Releases](../../releases). One file works on both Windows and Android.
+Download the latest `.geode` from [Releases](../../releases). The mod currently works only on Windows.
 
 ## Building
 ```sh
