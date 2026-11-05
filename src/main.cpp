@@ -6,6 +6,8 @@
 #include <Geode/ui/GeodeUI.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
+#include <Geode/modify/CCDirector.hpp>
+#include <Geode/modify/CCEGLView.hpp>
 #include <thread>
 #include <set>
 
