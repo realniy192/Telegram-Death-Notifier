@@ -39,7 +39,7 @@
   "msg-run": {
     "type": "string",
     "name": "Run message",
-    "description": "Startpos run (death or 100%). Placeholders: {player}, {start}, {end}, {level}",
+    "description": "Startpos or practice run (death or 100%). Placeholders: {player}, {start}, {end}, {level}",
     "default": "{player} got a {start}-{end}% run on {level}.",
     "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
   },
@@ -64,6 +64,33 @@
     "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
   },
 
+  "run-progress-title": {
+    "type": "title",
+    "name": "Minimum run progress",
+    "description": "Independent of the old endpoint filter. A level must still be enabled in the pause menu."
+  },
+  "run-progress-enabled": {
+    "type": "bool",
+    "name": "Enable minimum run progress",
+    "description": "Send when end minus start reaches the threshold, including practice checkpoint runs. Combines with the old filter using OR; disable the old row On toggle for step-only notifications.",
+    "default": false
+  },
+  "minimum-run-progress": {
+    "type": "int",
+    "name": "Minimum run progress (%)",
+    "description": "Minimum distance from the actual spawn to the first death/noclip collision or a clean 100%. Zero adds no distance restriction.",
+    "default": 0,
+    "min": 0,
+    "max": 100,
+    "enable-if": "run-progress-enabled"
+  },
+  "show-decimals": {
+    "type": "bool",
+    "name": "Show decimals",
+    "description": "Off: truncate start/end to whole percentages for calculations and messages. On: round each endpoint to hundredths for both calculations and messages (up to two decimal places).",
+    "default": false
+  },
+
   "extra-title": {
     "type": "title",
     "name": "Extra",
@@ -79,6 +106,6 @@
   "enable-if": "default-enabled",
   "enable-if-description": "Turn on \"Enabled on all levels\" first"
 },
-  "only-best": { "type": "bool", "name": "Only new bests", "default": false }
+  "only-best": { "type": "bool", "name": "Only new bests", "description": "Old filter only: normal-mode deaths from 0%. Does not restrict practice or the independent run-progress filter.", "default": false }
 }
 }

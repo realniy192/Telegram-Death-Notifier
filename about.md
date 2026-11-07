@@ -22,4 +22,8 @@ Sends a screenshot to your **Telegram channel** when you die, get a startpos run
 - {start} / {end} - run start and end percent
 - {level} - level name
 
-Practice mode deaths are never sent.
+Practice mode is supported. Placing checkpoints does not change the run start; respawning on one does.
+
+The optional Minimum run progress filter compares end minus start, independently of the old endpoint filter. It defaults to disabled with a threshold of 0. Both filters respect the level master switch; turn off the old rows for step-only notifications.
+
+Show decimals is off by default: calculations and messages use whole percentages. Enable it to calculate and display up to two decimal places. Noclip runs end on their first collision; restart or respawn to begin a new run.

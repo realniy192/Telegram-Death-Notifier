@@ -4,11 +4,8 @@
 #include <Geode/modify/EndLevelLayer.hpp>
 #include <Geode/ui/ScrollLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
-#include <Geode/utils/web.hpp>
-#include <Geode/utils/async.hpp>
-#include <Geode/modify/CCDirector.hpp>
-#include <Geode/modify/CCEGLView.hpp>
-#include <thread>
+#include "RunTracking.hpp"
+#include "Screenshot.hpp"
 #include <set>
 
 using namespace geode::prelude;
@@ -46,110 +43,6 @@ static std::string spKey(float x) {
     return fmt::format("sp-{}", (int)std::round(x));
 }
 
-// ======================= telegram =======================
-static void sendToTelegram(ByteVector png, std::string caption) {
-    auto token = std::string(utils::string::trim(Mod::get()->getSettingValue<std::string>("bot-token")));
-    auto chat  = std::string(utils::string::trim(Mod::get()->getSettingValue<std::string>("chat-id")));
-    if (token.starts_with("bot")) token = token.substr(3);
-    if (token.empty() || chat.empty()) return;
-
-    web::MultipartForm form;
-    form.param("chat_id", chat);
-    form.param("caption", caption);
-    form.file("photo", png, "shot.png", "image/png");
-
-    auto req = web::WebRequest();
-    req.bodyMultipart(form);
-
-    async::spawn(
-        req.post(fmt::format("https://api.telegram.org/bot{}/sendPhoto", token)),
-        [](web::WebResponse res) {
-            if (!res.ok()) {
-                log::warn("Telegram error {}: {}", res.code(), res.string().unwrapOr("?"));
-            }
-        }
-    );
-}
-
-// ======================= screenshot =======================
-#include <Geode/modify/CCEGLView.hpp>
-
-static std::vector<std::string> g_pendingShots;   // captions waiting for the next frame
-static int g_shotCounter = 0;
-
-// background thread: flip + PNG encode + file IO, then send on main thread
-static void encodeAndSend(std::shared_ptr<std::vector<uint8_t>> pixels, int w, int h, std::string caption) {
-    auto path = Mod::get()->getSaveDir() / fmt::format("shot-{}.png", g_shotCounter++);
-
-    std::thread([pixels, w, h, path, caption = std::move(caption)]() mutable {
-        // OpenGL gives the image upside down -> flip it
-        size_t row = (size_t)w * 4;
-        std::vector<uint8_t> flipped(pixels->size());
-        for (int y = 0; y < h; y++) {
-            std::memcpy(flipped.data() + (size_t)y * row,
-                        pixels->data() + (size_t)(h - 1 - y) * row, row);
-        }
-
-        auto image = new CCImage();
-        bool ok = image->initWithImageData(flipped.data(), (int)flipped.size(), CCImage::kFmtRawData, w, h, 8);
-        if (ok) ok = image->saveToFile(path.string().c_str(), true);
-        image->release();
-        if (!ok) return;
-
-        auto data = file::readBinary(path);
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-        if (!data) return;
-
-        geode::queueInMainThread([png = std::move(data).unwrap(), caption = std::move(caption)]() mutable {
-            sendToTelegram(std::move(png), std::move(caption));
-        });
-    }).detach();
-}
-
-// grab the finished frame right before it is shown on screen
-static void tgCaptureFrame() {
-    if (g_pendingShots.empty()) return;
-    auto captions = std::move(g_pendingShots);
-    g_pendingShots.clear();
-
-    GLint vp[4] = { 0, 0, 0, 0 };
-    glGetIntegerv(GL_VIEWPORT, vp);
-    int x = vp[0], y = vp[1], w = vp[2], h = vp[3];
-    if (w <= 0 || h <= 0) {
-        auto fs = CCDirector::get()->getOpenGLView()->getFrameSize();
-        x = 0; y = 0; w = (int)fs.width; h = (int)fs.height;
-    }
-    if (w <= 0 || h <= 0) return;
-
-    auto pixels = std::make_shared<std::vector<uint8_t>>((size_t)w * h * 4);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels->data());
-    for (auto& c : captions) encodeAndSend(pixels, w, h, std::move(c));
-}
-
-#ifdef GEODE_IS_ANDROID
-// on Android the real buffer swap happens in Java after drawScene
-class $modify(TGDirector, CCDirector) {
-    void drawScene() {
-        CCDirector::drawScene();
-        tgCaptureFrame();
-    }
-};
-#else
-class $modify(TGEGLView, CCEGLView) {
-    void swapBuffers() {
-        tgCaptureFrame();
-        CCEGLView::swapBuffers();
-    }
-};
-#endif
-
-// ask for a screenshot of the current frame
-static void shootAndSend(std::string caption) {
-    g_pendingShots.push_back(std::move(caption));
-}
-
 static std::string nickname() {
     auto mod = Mod::get();
     if (mod->getSettingValue<bool>("custom-nickname")) {
@@ -183,8 +76,9 @@ static std::optional<std::string> g_pendingWin;
 // ======================= gameplay =======================
 class $modify(TGPlayLayer, PlayLayer) {
     struct Fields {
-        int startPercent = 0;  // where this attempt started
-        bool failed = false;   // a death (real or noclip) already happened this attempt
+        tg::RunTracking run;
+        bool resetting = false;
+        bool restoredCheckpoint = false;
     };
 
     static void onModify(auto& self) {
@@ -194,67 +88,83 @@ class $modify(TGPlayLayer, PlayLayer) {
         }
     }
 
-    RunCfg currentRunCfg() {
+    tg::RunFilters currentFilters() {
+        auto mod = Mod::get();
         int id = m_level->m_levelID.value();
-        if (!levelEnabled(id)) return { false, 0 };
-        std::string run = m_startPosObject ? spKey(m_startPosObject->getPositionX()) : "zero";
-        return loadRunCfg(id, run);
+        std::string key = m_startPosObject ? spKey(m_startPosObject->getPositionX()) : "zero";
+        auto cfg = loadRunCfg(id, key);
+        return { levelEnabled(id), cfg.enabled, cfg.minPercent,
+                 mod->getSettingValue<bool>("run-progress-enabled"),
+                 (int)mod->getSettingValue<int64_t>("minimum-run-progress"),
+                 mod->getSettingValue<bool>("only-best") };
     }
 
-    std::string levelName() {
-        return std::string(m_level->m_levelName);
+    std::string runCaption(tg::RunResult const& run, bool completed) {
+        auto vars = std::vector<std::pair<std::string, std::string>> {
+            { "player", nickname() }, { "level", std::string(m_level->m_levelName) },
+            { "start", tg::formatPercent(run.start, run.decimals) },
+            { "end", tg::formatPercent(run.end, run.decimals) },
+            { "percent", tg::formatPercent(run.end, run.decimals) }
+        };
+        if (run.start > 0 || run.fromCheckpoint || m_isPracticeMode) {
+            return formatMsg("msg-run", "{player} got a {start}-{end}% run on {level}.", vars);
+        }
+        return completed
+            ? formatMsg("msg-beat", "{player} beat {level}!", vars)
+            : formatMsg("msg-death", "{player} died at {percent}% on {level}.", vars);
+    }
+
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        m_fields->run.restart(this->getCurrentPercent(), m_fields->run.fromCheckpoint);
+        return true;
     }
 
     void resetLevel() {
+        m_fields->resetting = true;
+        m_fields->restoredCheckpoint = false;
+        g_pendingWin.reset();
         PlayLayer::resetLevel();
-        m_fields->startPercent = this->getCurrentPercentInt();
-        m_fields->failed = false;
+        // loadFromCheckpoint records its exact restored percent inside this call.
+        if (!m_fields->restoredCheckpoint) {
+            m_fields->run.restart(this->getCurrentPercent());
+        }
+        m_fields->resetting = false;
+    }
+
+    void loadFromCheckpoint(CheckpointObject* checkpoint) {
+        PlayLayer::loadFromCheckpoint(checkpoint);
+        if (!checkpoint) return;
+        m_fields->run.restart(this->getCurrentPercent(), true);
+        if (m_fields->resetting) m_fields->restoredCheckpoint = true;
         g_pendingWin.reset();
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
-        int prevBest = m_level->m_normalPercent.value();
+        // Take progress/best before the game or another mod changes death state.
+        std::optional<std::string> caption;
+        if (obj != m_anticheatSpike && !m_fields->resetting) {
+            bool decimals = Mod::get()->getSettingValue<bool>("show-decimals");
+            auto run = m_fields->run.finish(this->getCurrentPercent(), decimals);
+            if (run && tg::shouldNotify(*run, currentFilters(), m_level->m_normalPercent.value(),
+                                        m_isPracticeMode, false)) {
+                caption = runCaption(*run, false);
+            }
+        }
         PlayLayer::destroyPlayer(player, obj);
-
-        if (obj == m_anticheatSpike) return;
-
-        // only the FIRST death of the attempt counts (real or noclip)
-        if (m_fields->failed) return;
-        m_fields->failed = true;
-
-        if (m_isPracticeMode) return;
-
-        auto cfg = currentRunCfg();
-        int start = m_fields->startPercent;
-        int percent = this->getCurrentPercentInt();
-
-        if (!cfg.enabled || percent < cfg.minPercent) return;
-        if (Mod::get()->getSettingValue<bool>("only-best") && start == 0 && percent <= prevBest) return;
-
-        std::string caption = start > 0
-    ? formatMsg("msg-run", "{player} got a {start}-{end}% run on {level}.", {
-          { "player", nickname() }, { "start", std::to_string(start) },
-          { "end", std::to_string(percent) }, { "level", levelName() } })
-    : formatMsg("msg-death", "{player} died at {percent}% on {level}.", {
-          { "player", nickname() }, { "percent", std::to_string(percent) },
-          { "level", levelName() } });
-
-        shootAndSend(std::move(caption));
+        if (caption) tg::queueScreenshot(std::move(*caption));
     }
 
     void levelComplete() {
-        g_pendingWin.reset();
-
-        if (!m_fields->failed && !m_isPracticeMode && currentRunCfg().enabled) {
-            int start = m_fields->startPercent;
-            g_pendingWin = start > 0
-    ? formatMsg("msg-run", "{player} got a {start}-{end}% run on {level}.", {
-          { "player", nickname() }, { "start", std::to_string(start) },
-          { "end", "100" }, { "level", levelName() } })
-    : formatMsg("msg-beat", "{player} beat {level}!", {
-          { "player", nickname() }, { "level", levelName() } });
+        bool decimals = Mod::get()->getSettingValue<bool>("show-decimals");
+        auto run = m_fields->run.finish(100.0, decimals);
+        if (run) {
+            g_pendingWin.reset();
+            if (tg::shouldNotify(*run, currentFilters(), m_level->m_normalPercent.value(),
+                                 m_isPracticeMode, true)) {
+                g_pendingWin = runCaption(*run, true);
+            }
         }
-
         PlayLayer::levelComplete();
     }
 };
@@ -273,7 +183,7 @@ class $modify(TGEndLayer, EndLevelLayer) {
         if (!g_pendingWin) return;
         auto caption = std::move(*g_pendingWin);
         g_pendingWin.reset();
-        shootAndSend(std::move(caption));
+        tg::queueScreenshot(std::move(caption));
     }
 };
 
@@ -371,8 +281,10 @@ protected:
         float rowH = 32.f;
 
         addLabel("Start", { listX + 35.f, listY + listH + 10.f }, 0.35f);
-        addLabel("On", { listX + listW * 0.6f, listY + listH + 10.f }, 0.35f);
-        addLabel("Min %", { listX + listW * 0.85f, listY + listH + 10.f }, 0.35f);
+        addLabel("Old", { listX + listW * 0.6f, listY + listH + 10.f }, 0.35f);
+        addLabel("End %", { listX + listW * 0.85f, listY + listH + 10.f }, 0.35f);
+        addLabel("Step filter: gear settings (independent of Old)",
+                 { size.width / 2, size.height - 68.f }, 0.25f);
 
         auto bg = CCLayerColor::create({ 0, 0, 0, 80 }, listW, listH);
         bg->setPosition({ listX, listY });
