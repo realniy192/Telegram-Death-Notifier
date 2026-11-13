@@ -1,4 +1,5 @@
 #include "Screenshot.hpp"
+#include "SecureTokenSetting.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCDirector.hpp>
@@ -621,7 +622,7 @@ void sendToTelegram() {
         batch = s_uploads.front();
     }
     try {
-        auto token = std::string(utils::string::trim(Mod::get()->getSettingValue<std::string>("bot-token")));
+        auto token = std::string(utils::string::trim(tg::botToken()));
         auto chat = std::string(utils::string::trim(Mod::get()->getSettingValue<std::string>("chat-id")));
         if (token.starts_with("bot")) token = token.substr(3);
         if (token.empty() || chat.empty() || batch->next >= batch->captions.size()) {

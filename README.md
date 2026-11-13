@@ -2,83 +2,111 @@
 
 <img src="logo.png" width="150" alt="Telegram Death Notifier logo" />
 
-A Geode mod for Geometry Dash that sends your progress to a **Telegram channel**: death screenshots, startpos runs and level completions. Like Discord death bots, but for Telegram.
-
-## Features
-- Death screenshots with your percent
-- Startpos runs (e.g. `71-100%`) with separate legacy settings for every startpos
-- Level complete screenshot on the end screen
-- Per-level master switch and legacy endpoint filter in the pause menu
-- Independent minimum run progress: `end - start >= threshold`
-- Practice support: placing/removing checkpoints does not interrupt a run; actually respawning on one starts a new segment
-- Noclip support: only the first collision ends a run; later collisions and the subsequent 100% cannot send again until a restart/respawn
-- Whole percentages by default; optional hundredths for both filtering and messages
-- Custom messages and nickname
+A Geode mod for Geometry Dash that sends death screenshots, clean run segments and level completions to a **Telegram channel**.
 
 ## Setup
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token
-2. Add the bot to your channel as an **admin**
-3. Open the mod settings and paste the bot token and channel (`@name` or `-100...`)
-4. In a level, pause and press the Telegram button to enable the mod for that level
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. Add the bot to your channel as an **admin**.
+3. Pause a level, press the Telegram button and open the **Telegram** tab.
+4. Enter the bot token and channel (`@name` or `-100...`), then press **Apply**.
+5. In **Runs**, enable the current level and choose a notification mode.
 
-## Filters and precision
-The per-level **Enabled** switch is the master switch for both filters.
+## Four tabs
+### Runs — current level
+**Enabled for this level** is the master switch. Choose exactly one mode:
 
-- **Old / End %** in the level popup preserves the previous filter and saved settings: compare the death/end percentage with the configured endpoint. **Only new bests** applies only to this filter, for normal-mode deaths from 0%; practice is not compared with the normal-mode best.
-- **Enable minimum run progress** in the gear settings is independent, globally configured and **off by default**. **Minimum run progress (%)** defaults to **0**, meaning no minimum distance restriction when enabled. For example, a threshold of 40 accepts `2-42%` and `10-55%`.
-- If either filter qualifies, one notification is sent, not two. For **step-only** notifications, keep the level enabled, turn off the old rows and enable minimum run progress in the gear settings.
-- **Show decimals** defaults to **off**: truncate both endpoints to whole percentages before subtracting and display integers. When enabled, round both endpoints to hundredths before subtracting and display up to two decimal places. Thus `2.9-42.1%` measures 40 in integer mode but 39.2 in decimal mode. The raw spawn percentage is retained even if the precision setting changes mid-attempt.
+- **Start positions:** configure `From 0%` and each startpos separately. **Notify** enables its row; **Min. end %** is the minimum final/death percentage. Only the first real death or noclip collision counts until a restart/respawn.
+- **Minimum progress:** send when `end - segment start >= threshold`. The threshold is 0–100; 0 adds no distance restriction. It does not depend on the startpos rows or Only new bests.
 
-In practice, a clean run starting at 0 remains a `0-end%` run even if checkpoints are placed along the way. Only restoration through `loadFromCheckpoint` changes its start. After respawning at 4%, reaching 54% gives a 50% segment. Practice and checkpoint results use the run template rather than claiming a normal-mode level completion.
+Mode and minimum progress are saved **per level**. Switching modes preserves the other mode's settings. The filters no longer combine with OR: a startpos row cannot bypass the minimum progress threshold.
 
-The first real death or noclip collision consumes the attempt even if no filter qualifies. A clean run to 100% also checks the filters. This relies on the noclip mod calling the hooked `PlayLayer::destroyPlayer`; mods that bypass this function cannot expose their collisions to this notifier.
+### Telegram — global
+- Bot token is always displayed as password dots, including while editing.
+- **Clear** empties the token field; the removal is committed only after **Apply**.
+- Channel/chat ID and setup instructions.
+- **Token missing**, **Chat missing**, or **Fields filled (not verified)** describes field completeness only, not a verified Telegram connection. No automatic test request/message is sent.
 
-## Message placeholders
+The token is stored locally as before. Masking protects its display; it is **not encryption** of the settings file.
+
+### Messages — global
+Edit the death, run and completion templates, custom-nickname toggle and nickname. Local previews use example data and never send anything to Telegram. An empty template uses the built-in fallback.
+
 | Placeholder | Meaning |
 |---|---|
-| `{player}` | Your nickname |
-| `{percent}` | Death/end percent |
-| `{start}` / `{end}` | Run start and end percent |
+| `{player}` | Nickname |
+| `{percent}` | End/death percentage |
+| `{start}` / `{end}` | Run endpoints |
 | `{level}` | Level name |
 
+### Extra — global
+- **Show decimals** is **off by default**: truncate both endpoints to whole percentages before subtraction and display integers.
+- **Decimal places** chooses **1–4 digits**, default **2**. When decimals are enabled, round both endpoints to that precision before subtraction and display exactly that many digits, including trailing zeros.
+- **Only new bests** applies only to Start positions mode, normal-mode deaths from 0%; it does not restrict practice, checkpoint segments or minimum progress.
+- Defaults for levels/rows without saved settings: enabled, mode, endpoint and minimum progress.
+
+For example, `2.9 -> 42.1` measures 40 in integer mode, but 39.20 with two decimals. Raw spawn progress is retained, so changing precision does not replace it with an already-rounded value.
+
+## Apply and standard Geode settings
+Changing tabs retains the current draft. **Apply** commits it; closing with changes asks **Discard / Save**. Invalid numeric fields show an error rather than silently applying a different number.
+
+All global options also remain on the mod's standard Geode settings page, grouped as **Runs / Telegram / Messages / Extra**. The token there is also masked and has a Clear button. Both interfaces use the same saved global values. Runs defaults on that page apply where no per-level choice is saved; configure a specific level in the pause-menu Runs tab.
+
+Existing level/startpos keys, Telegram credentials, templates and nickname are retained. The prior global minimum-progress toggle/threshold now supply defaults for levels without their own mode/threshold.
+
+## Practice and sequential noclip segments
+Placing, passing or removing a checkpoint does **not** change the start of a clean run. Actually respawning restores the exact progress through `loadFromCheckpoint` and begins the next segment. An uninterrupted practice run remains from 0%; a checkpoint respawn at 4% followed by death at 54% is a 50% segment.
+
+**Minimum progress mode** can report multiple clean segments in a single noclip attempt:
+
+| Threshold 40 | Distance | Result |
+|---|---:|---|
+| 0 -> 42, first collision | 42 | Send |
+| 42 -> 85, next collision | 43 | Send |
+| 85 -> 100, completion | 15 | Do not send |
+
+Every separate collision starts the next noclip segment, even if the previous segment was too short. Movement across collisions is not combined into one clean run. A real death waits for actual respawn before starting again. Repeated/dual callbacks during the same game step are deduplicated. Completion checks the last clean segment even after earlier segment notifications.
+
+Start positions mode retains the previous first-collision behavior. Noclip support requires the other mod to call the hooked `PlayLayer::destroyPlayer`; a mod bypassing that function cannot expose its collisions to this notifier.
+
 ## Screenshot implementation
-`src/Screenshot.cpp` owns capture, PNG encoding and Telegram delivery. Android captures to an isolated render texture after the scene draw, uses the physical drawable dimensions, resets the ambient projection/modelview for capture and restores rendering state afterward. Scene node/camera transforms that are part of the level are not removed. Other platforms capture the finished frame before buffer swap. Readback dimensions, RGBA row layout and GL errors are checked; invalid captures are dropped with a log entry instead of sending corrupted pixels.
+The working capture path is unchanged by the tab redesign. Android uses an isolated render texture, physical drawable dimensions, explicit ambient projection/modelview reset and restoration of rendering state. In-game scene/node camera transforms are retained. Other platforms read the finished framebuffer before swap. PNG encoding and sequential Telegram uploads remain bounded; overload or invalid captures are dropped with logs rather than paired with later frames.
 
-Capture/encoding is limited to one frame at a time. Uploading is a separate bounded queue (up to four PNG batches / 24 MiB); a slow upload does not block the next capture. Overload drops are logged rather than attaching an old caption to a later frame. Android scenes are visited again for the screenshot, so levels or mods with custom draw side effects/overlays require in-game testing. Unsupported custom director projections, incompatible framebuffer state or oversized images are rejected rather than sent as broken captures.
-
-## Download
-Download published `.geode` packages from [Releases](../../releases). Source targets Geode **5.11.2** and GD **2.2081**; see the verification notes below before treating Android support as device-tested.
+Android revisits the running scene, so custom rendering side effects/overlays require device testing. The new code changes only the token accessor in this module, not its GL capture or upload queue.
 
 ## Building
+Requires Geode **5.11.2**, GD **2.2081** and a matching compiler/toolchain. Set `GEODE_SDK`. The installed SDK requires CMake 3.25 or newer.
+
 ```sh
 geode build
 ```
-On Windows, build with Clang if MSVC crashes:
-```sh
-geode build -- -T ClangCL
-```
-For a fresh Windows build without installing into the game:
+Windows with Clang, without installing into the game:
 ```sh
 cmake -S . -B build-verify -G "Visual Studio 17 2022" -A x64 -T ClangCL -DGEODE_DONT_INSTALL_MODS=ON
 cmake --build build-verify --config Release
 ```
-Set `GEODE_SDK` to the SDK path. The installed SDK requires CMake 3.25 or newer. Do not reuse a CMake cache copied from a different source directory.
+Use a fresh cache if moving the source directory.
 
-Standalone logic tests do not require Geode:
+Standalone tests:
 ```sh
 cmake -S tests -B build-tests
 cmake --build build-tests --config Release
 ctest --test-dir build-tests -C Release --output-on-failure
 ```
 
-## Manual verification
-Automated logic tests do not simulate Geometry Dash, OpenGL drivers or other mods. Check these in-game before publishing:
-1. With the level disabled, neither filter sends. With only the step filter enabled at 40, verify 2-42 succeeds and 10-49 does not. With both filters enabled and passing, verify exactly one message.
-2. In practice, place checkpoints without dying and confirm the start remains 0. Die, respawn at a checkpoint and verify the next caption/threshold uses that restored percent. Try checkpoint removal and a full restart too.
-3. With noclip, hit an obstacle once, then more obstacles and finish: at most the first collision sends. Restart and verify notifications are re-armed. Test dual-player collisions as well.
-4. Toggle Show decimals and check the documented 2.9-42.1 boundary. Verify a clean 60-100 completion passes 40, while 61-100 does not in step-only mode.
-5. On Android32/64 devices, compare the screenshot with the screen at landscape/native resolutions, including non-power-of-two sizes and camera/shader levels. Check for skew, crop, vertical inversion and changed rendering after capture. Test practice and the completion overlay.
-6. Test Telegram delivery only with a channel/bot you control. No real Telegram messages are required for the standalone tests.
+GitHub Actions builds Windows, Android32 and Android64 and produces the combined **Build Output** artifact. The combine step sets `zstd: false` for ordinary ZIP Deflate compatibility. A locally built Windows-only `.geode` **cannot be installed on Android**; obtain the freshly combined Actions package instead. Do not merge old Android binaries into a new Windows package.
+
+## Manual acceptance checklist
+Automated tests do not simulate the game's UI, hooks or third-party mods. Before publishing:
+1. Open all four tabs on a phone. Check scrolling, text focus/keyboard, clipping, selection labels, Apply and unsaved-close confirmation. Input on another tab must be retained.
+2. Confirm token dots while typing and after reopening, on both settings interfaces. Clear then Discard preserves the old token; Clear then Save removes it. Do not share screenshots/logs with actual credentials.
+3. Enable one level in Start positions and another in Minimum progress. Reopen each and confirm independent modes/thresholds. Startpos rows must not bypass the step threshold.
+4. With minimum40 and noclip, verify qualifying 0-42 and 42-85 both report, while 85-100 does not. Test short segments, real death and dual. Start positions should still report only the first collision.
+5. In practice, place checkpoints without dying, then respawn on one. Verify the segment begins only at actual respawn. Test full restart/checkpoint removal.
+6. Check integer and 1/2/3/4-place percentages against message previews and threshold boundaries. Check the last qualifying segment at 100%.
+7. Compare Android screenshots against the displayed game, including camera/shader levels. Existing capture was reported working by the user; this does not cover all devices/mod combinations.
+8. Perform real delivery checks only with a bot/channel you control.
+
+See VERIFICATION.md for actual checks performed locally and their limitations.
 
 ## Credits
 Made by m3reana with AI assistance (sry...)

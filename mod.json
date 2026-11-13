@@ -1,111 +1,134 @@
 {
   "geode": "5.11.2",
-  "gd": { "win": "2.2081", "android": "2.2081", "mac": "2.2081" },
+  "gd": {
+    "win": "2.2081",
+    "android": "2.2081",
+    "mac": "2.2081"
+  },
   "id": "m3reana.tg-death-notifier",
   "name": "Telegram Death Notifier",
-  "version": "v1.0.0",
+  "version": "v1.0.1",
   "developer": "m3reana",
   "description": "Sends a death screenshot to a Telegram channel",
   "resources": {
-    "sprites": ["resources/*.png"]
+    "sprites": [
+      "resources/*.png"
+    ]
   },
   "settings": {
-  "telegram-title": { "type": "title", "name": "Telegram" },
-  "bot-token": {
-    "type": "string",
-    "name": "Bot token",
-    "default": "",
-    "filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_-"
-  },
-  "chat-id": {
-    "type": "string",
-    "name": "Channel (@name or -100...)",
-    "default": "",
-    "filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@_-"
-  },
-
-  "messages-title": {
-    "type": "title",
-    "name": "Messages",
-    "description": "Placeholders: {player}, {percent}, {start}, {end}, {level}"
-  },
-  "msg-death": {
-    "type": "string",
-    "name": "Death message",
-    "description": "Death from 0%. Placeholders: {player}, {percent}, {level}",
-    "default": "{player} died at {percent}% on {level}.",
-    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
-  },
-  "msg-run": {
-    "type": "string",
-    "name": "Run message",
-    "description": "Startpos or practice run (death or 100%). Placeholders: {player}, {start}, {end}, {level}",
-    "default": "{player} got a {start}-{end}% run on {level}.",
-    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
-  },
-  "msg-beat": {
-    "type": "string",
-    "name": "Level complete message",
-    "description": "Level beaten from 0%. Placeholders: {player}, {level}",
-    "default": "{player} beat {level}!",
-    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
-  },
-  "custom-nickname": {
-    "type": "bool",
-    "name": "Use custom nickname",
-    "description": "Use the nickname below instead of your GD username",
-    "default": false
-  },
-  "nickname": {
-    "type": "string",
-    "name": "Nickname",
-    "default": "",
-    "enable-if": "custom-nickname",
-    "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
-  },
-
-  "run-progress-title": {
-    "type": "title",
-    "name": "Minimum run progress",
-    "description": "Independent of the old endpoint filter. A level must still be enabled in the pause menu."
-  },
-  "run-progress-enabled": {
-    "type": "bool",
-    "name": "Enable minimum run progress",
-    "description": "Send when end minus start reaches the threshold, including practice checkpoint runs. Combines with the old filter using OR; disable the old row On toggle for step-only notifications.",
-    "default": false
-  },
-  "minimum-run-progress": {
-    "type": "int",
-    "name": "Minimum run progress (%)",
-    "description": "Minimum distance from the actual spawn to the first death/noclip collision or a clean 100%. Zero adds no distance restriction.",
-    "default": 0,
-    "min": 0,
-    "max": 100,
-    "enable-if": "run-progress-enabled"
-  },
-  "show-decimals": {
-    "type": "bool",
-    "name": "Show decimals",
-    "description": "Off: truncate start/end to whole percentages for calculations and messages. On: round each endpoint to hundredths for both calculations and messages (up to two decimal places).",
-    "default": false
-  },
-
-  "extra-title": {
-    "type": "title",
-    "name": "Extra",
-    "description": "Defaults for levels you haven't configured yet"
-  },
-  "default-enabled": { "type": "bool", "name": "Enabled on all levels", "default": false },
-  "default-min": {
-  "type": "int",
-  "name": "Default min percent",
-  "default": 0,
-  "min": 0,
-  "max": 100,
-  "enable-if": "default-enabled",
-  "enable-if-description": "Turn on \"Enabled on all levels\" first"
-},
-  "only-best": { "type": "bool", "name": "Only new bests", "description": "Old filter only: normal-mode deaths from 0%. Does not restrict practice or the independent run-progress filter.", "default": false }
-}
+    "runs-title": {
+      "type": "title",
+      "name": "Runs - level defaults",
+      "description": "Configure the current level and choose Start positions or Minimum run progress in the pause-menu Runs tab. Defaults are used only where no setting is saved."
+    },
+    "default-enabled": {
+      "type": "bool",
+      "name": "Enable unconfigured levels",
+      "default": false
+    },
+    "run-progress-enabled": {
+      "type": "bool",
+      "name": "Default mode: minimum run progress",
+      "description": "Default for levels without a saved mode. Off selects Start positions. Choose the current level mode in the Runs tab; only the selected filter runs.",
+      "default": false
+    },
+    "default-min": {
+      "type": "int",
+      "name": "Default minimum end percent",
+      "default": 0,
+      "min": 0,
+      "max": 100,
+      "description": "Start positions mode: default endpoint threshold for rows not configured yet."
+    },
+    "minimum-run-progress": {
+      "type": "int",
+      "name": "Default minimum run progress (%)",
+      "description": "Default step for levels without their own threshold. Each collision ends a clean segment. Noclip can report multiple qualifying segments in one attempt. Zero adds no distance restriction.",
+      "default": 0,
+      "min": 0,
+      "max": 100,
+      "enable-if": "run-progress-enabled"
+    },
+    "telegram-title": {
+      "type": "title",
+      "name": "Telegram"
+    },
+    "bot-token": {
+      "type": "custom:masked-token",
+      "name": "Bot token",
+      "description": "Always hidden. Clear removes the token after applying changes. Stored locally; masking is not encryption.",
+      "default": ""
+    },
+    "chat-id": {
+      "type": "string",
+      "name": "Channel (@name or -100...)",
+      "default": "",
+      "filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@_-"
+    },
+    "messages-title": {
+      "type": "title",
+      "name": "Messages",
+      "description": "Placeholders: {player}, {percent}, {start}, {end}, {level}"
+    },
+    "msg-death": {
+      "type": "string",
+      "name": "Death message",
+      "description": "Death from 0%. Placeholders: {player}, {percent}, {level}",
+      "default": "{player} died at {percent}% on {level}.",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
+    "msg-run": {
+      "type": "string",
+      "name": "Run message",
+      "description": "Startpos, practice or noclip segment. Placeholders: {player}, {start}, {end}, {level}",
+      "default": "{player} got a {start}-{end}% run on {level}.",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
+    "msg-beat": {
+      "type": "string",
+      "name": "Level complete message",
+      "description": "Level beaten from 0%. Placeholders: {player}, {level}",
+      "default": "{player} beat {level}!",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
+    "custom-nickname": {
+      "type": "bool",
+      "name": "Use custom nickname",
+      "description": "Use the nickname below instead of your GD username",
+      "default": false
+    },
+    "nickname": {
+      "type": "string",
+      "name": "Nickname",
+      "default": "",
+      "enable-if": "custom-nickname",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+    },
+    "extra-title": {
+      "type": "title",
+      "name": "Extra",
+      "description": "Global precision and notification options"
+    },
+    "show-decimals": {
+      "type": "bool",
+      "name": "Show decimals",
+      "description": "Off: truncate both endpoints to whole percentages. On: round and display the chosen number of decimal places for calculations and messages.",
+      "default": false
+    },
+    "decimal-places": {
+      "type": "int",
+      "name": "Decimal places",
+      "description": "Number of digits after the decimal point in percentages (1-4).",
+      "default": 2,
+      "min": 1,
+      "max": 4,
+      "enable-if": "show-decimals"
+    },
+    "only-best": {
+      "type": "bool",
+      "name": "Only new bests",
+      "description": "Start positions mode only: normal deaths from 0%. Does not restrict practice, checkpoint runs or minimum run progress.",
+      "default": false
+    }
+  }
 }
