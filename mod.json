@@ -7,7 +7,7 @@
   },
   "id": "m3reana.tg-death-notifier",
   "name": "Telegram Death Notifier",
-  "version": "v1.0.1",
+  "version": "v1.1.0",
   "developer": "m3reana",
   "description": "Sends a death screenshot to a Telegram channel",
   "resources": {

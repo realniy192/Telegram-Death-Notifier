@@ -155,11 +155,16 @@ class SettingsPopup : public Popup {
         parent->addChild(bg, -1);
     }
 
-    ButtonSprite* buttonSprite(std::string const& text, float width, float scale,
+    // Builds a vanilla ButtonSprite and scales it to fit inside width x height.
+    // ButtonSprite adds its own border padding, so the real size is measured
+    // instead of trusting the requested width.
+    ButtonSprite* buttonSprite(std::string const& text, float width, float height,
                                char const* font, char const* texture, float textScale) {
+        float scale = height / kButtonHeight;
         auto sprite = ButtonSprite::create(text.c_str(), (int)(width / scale), true,
             font, texture, kButtonHeight, textScale);
-        sprite->setScale(scale);
+        auto size = sprite->getContentSize();
+        sprite->setScale(std::min(width / size.width, height / size.height));
         return sprite;
     }
 
@@ -169,7 +174,7 @@ class SettingsPopup : public Popup {
         auto menu = PageMenu::create();
         menu->setPosition({0, 0});
         parent->addChild(menu);
-        auto sprite = buttonSprite(text, width, height / kButtonHeight, kIdleFont, texture, .8f);
+        auto sprite = buttonSprite(text, width, height, kIdleFont, texture, .7f);
         auto item = CCMenuItemSpriteExtra::create(sprite, this, callback);
         item->setPosition(pos);
         menu->addChild(item);
@@ -178,9 +183,8 @@ class SettingsPopup : public Popup {
 
     Choice choiceButton(CCMenu* menu, std::string const& text, CCPoint pos, float width,
                         float height, SEL_MenuHandler callback) {
-        float scale = height / kButtonHeight;
-        auto idle = buttonSprite(text, width, scale, kIdleFont, kIdleTexture, .8f);
-        auto active = buttonSprite(text, width, scale, kActiveFont, kActiveTexture, .65f);
+        auto idle = buttonSprite(text, width, height, kIdleFont, kIdleTexture, .65f);
+        auto active = buttonSprite(text, width, height, kActiveFont, kActiveTexture, .55f);
         auto size = idle->getScaledContentSize();
         auto holder = CCNode::create();
         holder->setContentSize(size);
@@ -352,12 +356,14 @@ class SettingsPopup : public Popup {
         auto modes = PageMenu::create();
         modes->setPosition({0, 0});
         page.content->addChild(modes);
-        float gap = 8.f;
-        float choiceWidth = (m_width - 8.f - gap) / 2;
-        m_startButton = choiceButton(modes, "Start positions", {4.f + choiceWidth / 2, y},
-            choiceWidth, 28.f, menu_selector(SettingsPopup::onStartMode));
-        m_stepButton = choiceButton(modes, "Minimum progress", {4.f + gap + choiceWidth * 1.5f, y},
-            choiceWidth, 28.f, menu_selector(SettingsPopup::onStepMode));
+        // Compact pair centered in the page, not stretched edge to edge.
+        float gap = 10.f;
+        float choiceWidth = std::min(140.f, (m_width - 8.f - gap) / 2);
+        float center = m_width / 2;
+        m_startButton = choiceButton(modes, "Start positions", {center - (choiceWidth + gap) / 2, y},
+            choiceWidth, 24.f, menu_selector(SettingsPopup::onStartMode));
+        m_stepButton = choiceButton(modes, "Minimum progress", {center + (choiceWidth + gap) / 2, y},
+            choiceWidth, 24.f, menu_selector(SettingsPopup::onStepMode));
         spacer(page, 6.f);
 
         float top = page.cursor;
@@ -426,7 +432,7 @@ class SettingsPopup : public Popup {
         section(page, "Telegram", "Shared by all levels");
         m_token = textField(page, "Bot token (always hidden)", m_global.token, kTokenChars, true, 64.f);
         button(page.content, "Clear", {m_width - 36.f, m_token->getPositionY()},
-               menu_selector(SettingsPopup::onClearToken), 52.f, 22.f, kDangerTexture);
+               menu_selector(SettingsPopup::onClearToken), 48.f, 20.f, kDangerTexture);
         textField(page, "Channel (@name or -100...)", m_global.chat, kChatChars);
         m_connection = label(page.content, "", 10.f, nextRow(page, 22.f), .26f, true, "chatFont.fnt");
         spacer(page, 4.f);
@@ -546,27 +552,30 @@ class SettingsPopup : public Popup {
         // Footer: save state on the left, Apply on the right.
         m_dirty = label(m_mainLayer, "", 16.f, 22.f, .24f, true, "chatFont.fnt");
         m_dirty->limitLabelWidth(width - 130.f, .53f, .4f);
-        m_apply = button(m_mainLayer, "Apply", {width - 52.f, 22.f},
-            menu_selector(SettingsPopup::onApply), 72.f, 26.f);
+        m_apply = button(m_mainLayer, "Apply", {width - 48.f, 22.f},
+            menu_selector(SettingsPopup::onApply), 64.f, 24.f);
 
         // Tabs sit in their own row above the panel instead of overlapping it.
         char const* titles[] = {"Runs", "Telegram", "Messages", "Extra"};
         auto tabs = PageMenu::create();
         tabs->setPosition({0, 0});
         m_mainLayer->addChild(tabs);
+        // Compact, evenly spaced tab row centered under the title.
         float tabGap = 6.f;
-        float tabWidth = (m_width - tabGap * 3) / 4;
-        float tabY = height - 52.f;
+        float tabWidth = std::min(84.f, (m_width - tabGap * 3) / 4);
+        float rowWidth = tabWidth * 4 + tabGap * 3;
+        float rowStart = 12.f + (m_width - rowWidth) / 2;
+        float tabY = height - 50.f;
         for (int i = 0; i < 4; ++i) {
             auto tab = choiceButton(tabs, titles[i],
-                {12.f + tabWidth / 2 + (tabWidth + tabGap) * i, tabY}, tabWidth, 24.f,
+                {rowStart + tabWidth / 2 + (tabWidth + tabGap) * i, tabY}, tabWidth, 22.f,
                 menu_selector(SettingsPopup::onTab));
             tab.button->setTag(i);
             m_tabs.push_back(tab);
         }
 
         float panelBottom = 42.f;
-        float viewHeight = tabY - 18.f - panelBottom;
+        float viewHeight = tabY - 17.f - panelBottom;
         auto panel = NineSlice::create("square02_001.png");
         panel->setContentSize({m_width, viewHeight});
         panel->setAnchorPoint({0.f, 0.f});
