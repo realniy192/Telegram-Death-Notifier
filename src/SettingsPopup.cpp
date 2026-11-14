@@ -290,6 +290,63 @@ class SettingsPopup : public Popup {
         page.cursor -= height + 6.f;
     }
 
+        // Yellow pill with a placeholder name inside. Returns its width.
+    float chip(CCNode* parent, std::string const& text, float x, float y, float scale = .46f) {
+        auto label = CCLabelBMFont::create(text.c_str(), "chatFont.fnt");
+        label->setScale(scale);
+        label->setColor(kAccentColor);
+        float width = label->getScaledContentWidth() + 10.f;
+        float height = 15.f;
+        auto bg = NineSlice::create("square02b_001.png");
+        bg->setContentSize({width * 2.f, height * 2.f});
+        bg->setScale(.5f);
+        bg->setColor({255, 190, 50});
+        bg->setOpacity(50);
+        bg->setAnchorPoint({0.f, .5f});
+        bg->setPosition({x, y});
+        parent->addChild(bg);
+        label->setAnchorPoint({.5f, .5f});
+        label->setPosition({x + width / 2, y});
+        parent->addChild(label);
+        return width;
+    }
+
+    // Placeholder cheat sheet: a 3-column grid of chips, each with its meaning.
+    void placeholders(Page& page) {
+        struct Item { char const* tag; char const* meaning; };
+        Item const items[] = {
+            {"{player}", "your name"}, {"{level}", "level name"}, {"{percent}", "death %"},
+            {"{start}", "run start %"}, {"{end}", "run end %"},
+        };
+        constexpr int columns = 3;
+        constexpr int count = sizeof(items) / sizeof(items[0]);
+        constexpr int rows = (count + columns - 1) / columns;
+        float header = 16.f, rowHeight = 20.f;
+        float top = page.cursor - 2.f;
+        float height = header + rows * rowHeight + 12.f;
+        card(page.content, top - height / 2, height);
+        auto bar = CCLayerColor::create({255, 200, 60, 210}, 2.f, height - 10.f);
+        bar->setPosition({9.f, top - height + 5.f});
+        page.content->addChild(bar);
+
+        float left = 17.f;
+        richLine(page.content, "*Placeholders*  -  put them in any message below", left,
+                 top - 5.f - header / 2, .46f, kMutedColor);
+        float columnWidth = (m_width - left - 8.f) / columns;
+        for (int i = 0; i < count; ++i) {
+            float x = left + columnWidth * (i % columns);
+            float y = top - 5.f - header - rowHeight * (i / columns + .5f);
+            float width = chip(page.content, items[i].tag, x, y);
+            auto meaning = CCLabelBMFont::create(items[i].meaning, "chatFont.fnt");
+            meaning->setColor(kHintColor);
+            meaning->setAnchorPoint({0.f, .5f});
+            meaning->setPosition({x + width + 5.f, y});
+            meaning->limitLabelWidth(columnWidth - width - 10.f, .44f, .25f);
+            page.content->addChild(meaning);
+        }
+        page.cursor -= height + 6.f;
+    }
+
     // Small muted line under a control.
     void note(Page& page, std::string const& markup, float height = 18.f) {
         richLine(page.content, markup, 12.f, nextRow(page, height), .48f, kMutedColor);
@@ -566,7 +623,7 @@ class SettingsPopup : public Popup {
 
     void buildMessages(Page& page) {
         section(page, "Messages", "Shared by all levels");
-        infoBox(page, {"Placeholders:   [{player}]   [{level}]   [{percent}]   [{start}]   [{end}]"});
+        placeholders(page);
         textField(page, "Death message", m_global.deathMessage, kMessageChars);
         preview(page, m_global.deathMessage, "{player} died at {percent}% on {level}.", false);
         textField(page, "Run message (start pos / practice / noclip)", m_global.runMessage, kMessageChars);
