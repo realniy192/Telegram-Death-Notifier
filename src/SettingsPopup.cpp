@@ -315,8 +315,8 @@ class SettingsPopup : public Popup {
     void placeholders(Page& page) {
         struct Item { char const* tag; char const* meaning; };
         Item const items[] = {
-            {"{player}", "your name"}, {"{level}", "level name"}, {"{percent}", "death %"},
-            {"{start}", "run start %"}, {"{end}", "run end %"},
+            {"{player}", "Your Name"}, {"{level}", "Level Name"}, {"{percent}", "Run %"},
+            {"{start}", "Run Start %"}, {"{end}", "Run End %"},
         };
         constexpr int columns = 3;
         constexpr int count = sizeof(items) / sizeof(items[0]);
@@ -330,7 +330,7 @@ class SettingsPopup : public Popup {
         page.content->addChild(bar);
 
         float left = 17.f;
-        richLine(page.content, "*Placeholders*  -  put them in any message below", left,
+        richLine(page.content, "*Placeholders*  -  put them in any message below.", left,
                  top - 5.f - header / 2, .46f, kMutedColor);
         float columnWidth = (m_width - left - 8.f) / columns;
         for (int i = 0; i < count; ++i) {
