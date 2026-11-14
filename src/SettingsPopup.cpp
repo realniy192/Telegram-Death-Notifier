@@ -648,7 +648,7 @@ class SettingsPopup : public Popup {
         m_refresh.push_back([this, digits] { digits->setEnabled(m_global.showDecimals); });
         note(page, "*Off:*  [54%]      *On:*  [54.32%]");
         toggle(page.content, "Only new bests", m_global.onlyBest, nextRow(page, 32.f));
-        note(page, "Only a new best from [0%] is sent. Works only when *Start Positions* mode is enabled");
+        note(page, "Only a new best from [0%] is sent. Works only when *Start Positions* mode is enabled.");
         spacer(page, 6.f);
         section(page, "Defaults", "Levels without settings");
         toggle(page.content, "Enabled on new levels", m_global.defaultEnabled, nextRow(page, 32.f));
