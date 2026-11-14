@@ -25,8 +25,12 @@ constexpr char kActiveFont[] = "bigFont.fnt";
 // Native ButtonSprite height; smaller buttons are scaled down instead of squashed.
 constexpr float kButtonHeight = 30.f;
 
-constexpr ccColor3B kHintColor = {185, 195, 210};
-constexpr ccColor3B kMutedColor = {140, 150, 165};
+// Warm palette that matches the brown GD popup instead of cold blue-gray.
+constexpr ccColor3B kHintColor = {245, 230, 205};   // main explanation text (cream)
+constexpr ccColor3B kMutedColor = {200, 168, 130};  // secondary notes (warm tan)
+constexpr ccColor3B kBrightColor = {255, 255, 255}; // *keyword* in rich text
+constexpr ccColor3B kAccentColor = {255, 214, 70};  // [value] in rich text (yellow)
+constexpr ccColor3B kPreviewColor = {230, 210, 175};
 constexpr ccColor3B kOkColor = {120, 230, 140};
 constexpr ccColor3B kWarnColor = {255, 205, 90};
 constexpr ccColor3B kErrorColor = {255, 110, 110};
@@ -204,6 +208,93 @@ class SettingsPopup : public Popup {
         choice.active->setVisible(selected);
     }
 
+    // One line of mixed-color text.
+    // Markup: [text] = yellow value, *text* = white keyword, >> = drawn arrow.
+    CCNode* richLine(CCNode* parent, std::string const& markup, float x, float y,
+                     float scale = .52f, ccColor3B base = kHintColor) {
+        auto line = CCNode::create();
+        std::vector<CCNode*> parts;
+        float cursor = 0.f, height = 0.f;
+        auto addText = [&](std::string const& text, ccColor3B color) {
+            if (text.empty()) return;
+            auto node = CCLabelBMFont::create(text.c_str(), "chatFont.fnt");
+            node->setScale(scale);
+            node->setColor(color);
+            node->setAnchorPoint({0.f, .5f});
+            node->setPositionX(cursor);
+            line->addChild(node);
+            parts.push_back(node);
+            cursor += node->getScaledContentWidth();
+            height = std::max(height, node->getScaledContentHeight());
+        };
+        auto addArrow = [&] {
+            // chatFont has no arrow glyph, so the arrow is drawn.
+            float gap = 5.f * scale, length = 18.f * scale, head = 6.f * scale;
+            auto color = ccc4FFromccc3B(kAccentColor);
+            auto arrow = CCDrawNode::create();
+            arrow->drawSegment({0.f, 0.f}, {length - head * .5f, 0.f}, .9f * scale, color);
+            CCPoint tip[] = {{length, 0.f}, {length - head, head * .7f}, {length - head, -head * .7f}};
+            arrow->drawPolygon(tip, 3, color, 0.f, color);
+            arrow->setPositionX(cursor + gap);
+            line->addChild(arrow);
+            parts.push_back(arrow);
+            cursor += gap * 2.f + length;
+        };
+        std::string buffer;
+        bool value = false, keyword = false;
+        auto flush = [&] {
+            addText(buffer, value ? kAccentColor : keyword ? kBrightColor : base);
+            buffer.clear();
+        };
+        for (size_t i = 0; i < markup.size(); ++i) {
+            char c = markup[i];
+            if (c == '[' || c == ']') { flush(); value = c == '['; continue; }
+            if (c == '*') { flush(); keyword = !keyword; continue; }
+            if (c == '>' && i + 1 < markup.size() && markup[i + 1] == '>') { flush(); addArrow(); ++i; continue; }
+            buffer += c;
+        }
+        flush();
+        line->setContentSize({cursor, height});
+        for (auto part : parts) part->setPositionY(height / 2);
+        line->setAnchorPoint({0.f, .5f});
+        line->setPosition({x, y});
+        float maxWidth = m_width - x - 8.f;
+        if (cursor > maxWidth) line->setScale(maxWidth / cursor);
+        parent->addChild(line);
+        return line;
+    }
+
+    // Soft card with a yellow accent bar: groups explanation lines so the
+    // page reads as one block instead of loose floating text.
+    float infoBox(CCNode* parent, float top, std::vector<std::string> const& lines,
+                  bool accent = true, ccColor3B base = kHintColor, float scale = .52f,
+                  float lineHeight = 16.f) {
+        float height = lines.size() * lineHeight + 10.f;
+        card(parent, top - height / 2, height);
+        float textX = 12.f;
+        if (accent) {
+            auto bar = CCLayerColor::create({255, 200, 60, 210}, 2.f, height - 10.f);
+            bar->setPosition({9.f, top - height + 5.f});
+            parent->addChild(bar);
+            textX = 17.f;
+        }
+        for (size_t i = 0; i < lines.size(); ++i) {
+            richLine(parent, lines[i], textX, top - 5.f - lineHeight * (i + .5f), scale, base);
+        }
+        return height;
+    }
+
+    void infoBox(Page& page, std::vector<std::string> const& lines, bool accent = true,
+                 ccColor3B base = kHintColor, float scale = .52f) {
+        float height = infoBox(page.content, page.cursor - 2.f, lines, accent, base, scale);
+        page.cursor -= height + 6.f;
+    }
+
+    // Small muted line under a control.
+    void note(Page& page, std::string const& markup, float height = 18.f) {
+        richLine(page.content, markup, 12.f, nextRow(page, height), .48f, kMutedColor);
+    }
+
     float nextRow(Page& page, float height) {
         page.cursor -= height;
         return page.cursor + height / 2;
@@ -228,7 +319,7 @@ class SettingsPopup : public Popup {
     }
 
     void description(Page& page, std::string const& text, float height = 18.f) {
-        hint(page.content, text, 10.f, nextRow(page, height));
+        richLine(page.content, text, 12.f, nextRow(page, height));
     }
 
     void spacer(Page& page, float height = 6.f) { page.cursor -= height; }
@@ -374,7 +465,8 @@ class SettingsPopup : public Popup {
 
         // Start positions: one card per start position.
         if (m_entries.empty()) {
-            hint(m_startPanel, "No start positions found in this level.", 10.f, top - 14.f, .26f, kMutedColor);
+            infoBox(m_startPanel, top - 2.f, {"No start positions in this level - only runs from *0%* count."},
+                false, kMutedColor, .5f);
         } else {
             auto header = [&](std::string const& text, float x, bool left) {
                 auto node = label(m_startPanel, text, x, top - 10.f, .26f, left);
@@ -418,12 +510,16 @@ class SettingsPopup : public Popup {
 
         // Minimum progress: one threshold plus a short, plain explanation.
         numberField(m_stepPanel, "Minimum run length (%)", m_level.minRunProgress, top - 16.f);
-        hint(m_stepPanel, "Sends a message when a run is at least this long.", 10.f, top - 44.f, .26f);
-        hint(m_stepPanel, "Run length = death % - start %", 10.f, top - 62.f, .26f);
-        hint(m_stepPanel, "Example: start at 4%, die at 54% -> 50% run", 10.f, top - 80.f, .26f);
-        hint(m_stepPanel, "Noclip: every hit starts a new run.", 10.f, top - 104.f, .24f, kMutedColor);
-        hint(m_stepPanel, "Practice: the start moves only after a respawn.", 10.f, top - 120.f, .24f, kMutedColor);
-        hint(m_stepPanel, "0 = notify about every run.", 10.f, top - 136.f, .24f, kMutedColor);
+        float boxTop = top - 37.f;
+        boxTop -= infoBox(m_stepPanel, boxTop, {
+            "Sends a message when a run is at least this long.",
+            "Example:  [4 - 54%] >> [50% run]",
+        }) + 6.f;
+        infoBox(m_stepPanel, boxTop, {
+            "*Noclip:*  every hit starts a new run",
+            "*Practice:*  the start moves only after a respawn",
+            "[0]  =  every run is sent",
+        }, false, kMutedColor, .48f, 15.f);
         m_startPanel->setVisible(m_level.mode == tg::RunMode::StartPositions);
         m_stepPanel->setVisible(m_level.mode == tg::RunMode::MinimumProgress);
     }
@@ -437,13 +533,13 @@ class SettingsPopup : public Popup {
         m_connection = label(page.content, "", 10.f, nextRow(page, 22.f), .26f, true, "chatFont.fnt");
         spacer(page, 4.f);
         section(page, "Setup");
-        description(page, "1. Create a bot with @BotFather.");
-        description(page, "2. Add the bot to your channel as an admin.");
-        description(page, "3. Paste the token and channel, then press Apply.");
-        hint(page.content, "The bot and channel are not checked until a message is sent.",
-             10.f, nextRow(page, 18.f), .23f, kMutedColor);
-        hint(page.content, "Clear removes the token only after Apply.",
-             10.f, nextRow(page, 16.f), .23f, kMutedColor);
+        infoBox(page, {
+            "[1]   Create a bot with *@BotFather* and copy its token",
+            "[2]   Add the bot to your channel as an *admin*",
+            "[3]   Paste the token and channel, then press *Apply*",
+        });
+        note(page, "Nothing is checked until the first message is sent.", 16.f);
+        note(page, "*Clear* removes the token only after *Apply*.", 16.f);
     }
 
     void preview(Page& page, std::string& message, std::string const& fallback, bool run) {
@@ -453,7 +549,7 @@ class SettingsPopup : public Popup {
         node->setWrappingMode(WORD_WRAP);
         node->setAnchorPoint({0.f, .5f});
         node->setPosition({12.f, nextRow(page, 30.f)});
-        node->setColor({150, 215, 230, 255});
+        node->setColor({kPreviewColor.r, kPreviewColor.g, kPreviewColor.b, 255});
         page.content->addChild(node);
         m_refresh.push_back([this, node, text = &message, fallback, run] {
             int digits = m_global.showDecimals ? m_global.decimalPlaces : 0;
@@ -470,8 +566,7 @@ class SettingsPopup : public Popup {
 
     void buildMessages(Page& page) {
         section(page, "Messages", "Shared by all levels");
-        description(page, "Placeholders: {player} {level} {percent} {start} {end}");
-        spacer(page, 2.f);
+        infoBox(page, {"Placeholders:   [{player}]   [{level}]   [{percent}]   [{start}]   [{end}]"});
         textField(page, "Death message", m_global.deathMessage, kMessageChars);
         preview(page, m_global.deathMessage, "{player} died at {percent}% on {level}.", false);
         textField(page, "Run message (start pos / practice / noclip)", m_global.runMessage, kMessageChars);
@@ -484,7 +579,7 @@ class SettingsPopup : public Popup {
         auto nickname = textField(page, "Nickname", m_global.nickname,
             " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.");
         m_refresh.push_back([this, nickname] { nickname->setEnabled(m_global.customNickname); });
-        hint(page.content, "Previews are local - nothing is sent.", 10.f, nextRow(page, 18.f), .23f, kMutedColor);
+        note(page, "Previews are local - nothing is sent.");
     }
 
     void buildExtra(Page& page) {
@@ -494,17 +589,17 @@ class SettingsPopup : public Popup {
                     nextRow(page, 34.f), 1, 4);
         auto digits = m_numbers.back().input;
         m_refresh.push_back([this, digits] { digits->setEnabled(m_global.showDecimals); });
-        description(page, "Off: whole percents. On: rounded to the chosen digits.");
+        note(page, "*Off:*  [54%]      *On:*  [54.32%]");
         toggle(page.content, "Only new bests", m_global.onlyBest, nextRow(page, 32.f));
-        description(page, "Start positions mode only, for normal runs from 0%.");
+        note(page, "Only a new best from [0%] is sent. *Start positions* mode only.");
         spacer(page, 6.f);
         section(page, "Defaults", "Levels without settings");
         toggle(page.content, "Enabled on new levels", m_global.defaultEnabled, nextRow(page, 32.f));
         toggle(page.content, "Default mode: minimum progress", m_global.defaultStepMode, nextRow(page, 32.f));
-        description(page, "Off = Start positions for new levels.");
+        note(page, "*Off:*  new levels use *Start positions*");
         numberField(page.content, "Default minimum end %", m_global.defaultMin, nextRow(page, 34.f));
         numberField(page.content, "Default minimum run length %", m_global.defaultMinRunProgress, nextRow(page, 34.f));
-        hint(page.content, "Defaults never overwrite saved level settings.", 10.f, nextRow(page, 18.f), .23f, kMutedColor);
+        note(page, "Used only by levels you haven't set up yet.");
     }
 
     bool validate() {
@@ -534,9 +629,12 @@ class SettingsPopup : public Popup {
 
     bool init(PlayLayer* layer) {
         auto screen = CCDirector::get()->getWinSize();
-        float width = std::min(440.f, screen.width - 28.f);
-        float height = std::min(300.f, screen.height - 18.f);
+        // The close button sits on the top-left corner and sticks out of the
+        // popup, so leave enough margin for it to stay fully on screen.
+        float width = std::min(440.f, screen.width - 64.f);
+        float height = std::min(290.f, screen.height - 44.f);
         if (!Popup::init(width, height)) return false;
+        if (m_closeBtn) m_closeBtn->setPosition(m_closeBtn->getPosition() + CCPoint{4.f, -4.f});
         m_width = width - 24.f;
         m_levelID = layer->m_level->m_levelID.value();
         m_global = tg::loadGlobalCfg();
