@@ -403,7 +403,7 @@ class SettingsPopup : public Popup {
             bool token = !utils::string::trim(m_global.token).empty();
             bool chat = !utils::string::trim(m_global.chat).empty();
             m_connection->setString(!token ? "Bot token is missing"
-                : !chat ? "Channel is missing" : "Ready - press Apply to save");
+                : !chat ? "Channel is missing" : "Unsaved changes - press Apply to save.");
             m_connection->setColor(token && chat ? kOkColor : kErrorColor);
         }
         if (m_startButton) setSelected(*m_startButton, m_level.mode == tg::RunMode::StartPositions);
@@ -451,7 +451,7 @@ class SettingsPopup : public Popup {
         float gap = 10.f;
         float choiceWidth = std::min(140.f, (m_width - 8.f - gap) / 2);
         float center = m_width / 2;
-        m_startButton = choiceButton(modes, "Start positions", {center - (choiceWidth + gap) / 2, y},
+        m_startButton = choiceButton(modes, "Start Positions", {center - (choiceWidth + gap) / 2, y},
             choiceWidth, 24.f, menu_selector(SettingsPopup::onStartMode));
         m_stepButton = choiceButton(modes, "Minimum progress", {center + (choiceWidth + gap) / 2, y},
             choiceWidth, 24.f, menu_selector(SettingsPopup::onStepMode));
@@ -516,9 +516,9 @@ class SettingsPopup : public Popup {
             "Example:  [4 - 54%] >> [50% run]",
         }) + 6.f;
         infoBox(m_stepPanel, boxTop, {
-            "*Noclip:*  every hit starts a new run",
-            "*Practice:*  the start moves only after a respawn",
-            "[0]  =  every run is sent",
+            "*Noclip:*  every death starts a new run.",
+            "*Practice:*  the start moves only after a respawn.",
+            "[0%]  =  every run is sent.",
         }, false, kMutedColor, .48f, 15.f);
         m_startPanel->setVisible(m_level.mode == tg::RunMode::StartPositions);
         m_stepPanel->setVisible(m_level.mode == tg::RunMode::MinimumProgress);
@@ -534,12 +534,12 @@ class SettingsPopup : public Popup {
         spacer(page, 4.f);
         section(page, "Setup");
         infoBox(page, {
-            "[1]   Create a bot with *@BotFather* and copy its token",
-            "[2]   Add the bot to your channel as an *admin*",
-            "[3]   Paste the token and channel, then press *Apply*",
+            "[1.]   Create a bot with [@BotFather] and copy its token.",
+            "[2.]   Add the bot to your channel as an [admin].",
+            "[3.]   Paste the token and channel, then press [Apply].",
         });
-        note(page, "Nothing is checked until the first message is sent.", 16.f);
-        note(page, "*Clear* removes the token only after *Apply*.", 16.f);
+        note(page, "Token and channel aren't verified until the first message is sent.", 16.f);
+        note(page, "*Clear* won't delete the saved token until you press *Apply*.", 16.f);
     }
 
     void preview(Page& page, std::string& message, std::string const& fallback, bool run) {
@@ -591,12 +591,12 @@ class SettingsPopup : public Popup {
         m_refresh.push_back([this, digits] { digits->setEnabled(m_global.showDecimals); });
         note(page, "*Off:*  [54%]      *On:*  [54.32%]");
         toggle(page.content, "Only new bests", m_global.onlyBest, nextRow(page, 32.f));
-        note(page, "Only a new best from [0%] is sent. *Start positions* mode only.");
+        note(page, "Only a new best from [0%] is sent. Works only when *Start Positions* mode is enabled");
         spacer(page, 6.f);
         section(page, "Defaults", "Levels without settings");
         toggle(page.content, "Enabled on new levels", m_global.defaultEnabled, nextRow(page, 32.f));
         toggle(page.content, "Default mode: minimum progress", m_global.defaultStepMode, nextRow(page, 32.f));
-        note(page, "*Off:*  new levels use *Start positions*");
+        note(page, "*Off:* new levels use *Start Positions* mode.");
         numberField(page.content, "Default minimum end %", m_global.defaultMin, nextRow(page, 34.f));
         numberField(page.content, "Default minimum run length %", m_global.defaultMinRunProgress, nextRow(page, 34.f));
         note(page, "Used only by levels you haven't set up yet.");
