@@ -687,7 +687,7 @@ bool enqueueJobs(std::vector<UploadJob> jobs) {
 
 // One PNG, one job per caption. Captions over the photo limit are sent as a
 // clean photo followed by a text message, so long stats are never rejected.
-void enqueuePhoto(ByteVector bytes, std::vector<std::string> captions, bool noCaption) {
+void enqueuePhoto(ByteVector bytes, std::vector<tg::ShotText> captions, bool noCaption) {
     if (bytes.size() > freePNGBudget()) {
         log::warn("Telegram upload queue is full; encoded frame dropped");
         return;
@@ -695,12 +695,14 @@ void enqueuePhoto(ByteVector bytes, std::vector<std::string> captions, bool noCa
     auto png = std::make_shared<QueuedPNG const>(std::move(bytes));
     std::vector<UploadJob> jobs;
     if (noCaption || captions.empty()) jobs.push_back({png, ""});
-    else for (auto& caption : captions) {
-        if (caption.size() <= kPhotoCaptionLimit) jobs.push_back({png, std::move(caption)});
+    else for (auto& text : captions) {
+        if (text.caption.size() <= kPhotoCaptionLimit) jobs.push_back({png, std::move(text.caption)});
         else {
             jobs.push_back({png, ""});
-            jobs.push_back({nullptr, std::move(caption)});
+            jobs.push_back({nullptr, std::move(text.caption)});
         }
+        // Follows its own photo, so the order in the channel is always right.
+        if (!text.followUp.empty()) jobs.push_back({nullptr, std::move(text.followUp)});
     }
     enqueueJobs(std::move(jobs));
 }
@@ -743,7 +745,7 @@ void applySkew(Frame& frame, float pixelsPerRow) {
     }
 }
 
-void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_ptr<BatchLease> lease,
+void encodeAndSend(Frame frame, std::vector<tg::ShotText> captions, std::shared_ptr<BatchLease> lease,
                    EncodeOptions options) {
     static uint64_t counter = 0; // render thread only
     auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -797,7 +799,7 @@ constexpr size_t kMaxFallbackFrames = 2;
 
 struct PendingShot {
     uint64_t id = 0;
-    std::string caption;
+    tg::ShotText text;
     std::chrono::steady_clock::time_point due;
     bool wantFallback = false; // delayed: also keep the frame of the moment it was queued
     bool flushed = false;      // level restarted before the delay passed
@@ -822,7 +824,7 @@ bool captureFrame(Frame& frame) {
     return ok;
 }
 
-void encode(Frame frame, std::vector<std::string> captions) {
+void encode(Frame frame, std::vector<tg::ShotText> captions) {
     s_busy.store(true);
     std::shared_ptr<BatchLease> lease;
     try { lease = std::make_shared<BatchLease>(); }
@@ -847,7 +849,7 @@ void capturePending() {
     if (s_busy.load()) return;
     auto now = std::chrono::steady_clock::now();
     std::optional<Frame> restartFrame;
-    std::vector<std::string> captions;
+    std::vector<tg::ShotText> captions;
     std::vector<uint64_t> fallbackIds;
     {
         std::lock_guard lock(s_queueMutex);
@@ -856,13 +858,13 @@ void capturePending() {
             [](PendingShot const& shot) { return shot.flushed && shot.fallback; });
         if (flushed != s_pending.end()) {
             restartFrame = std::move(flushed->fallback);
-            captions.push_back(std::move(flushed->caption));
+            captions.push_back(std::move(flushed->text));
             s_pending.erase(flushed);
         }
         else {
             for (auto it = s_pending.begin(); it != s_pending.end();) {
                 if (it->due <= now) {
-                    captions.push_back(std::move(it->caption));
+                    captions.push_back(std::move(it->text));
                     it = s_pending.erase(it);
                     continue;
                 }
@@ -892,7 +894,7 @@ void capturePending() {
 } // namespace
 
 void tg::queueScreenshot(ShotRequest request) {
-    if (request.caption.size() > kMaxCaptionBytes) {
+    if (request.caption.size() > kMaxCaptionBytes || request.followUp.size() > kMaxCaptionBytes) {
         log::warn("Screenshot caption exceeds queue size limit; dropped");
         return;
     }
@@ -905,7 +907,7 @@ void tg::queueScreenshot(ShotRequest request) {
     try {
         PendingShot shot;
         shot.id = ++s_nextShotId;
-        shot.caption = std::move(request.caption);
+        shot.text = {std::move(request.caption), std::move(request.followUp)};
         shot.due = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay);
         shot.wantFallback = delay > 0;
         s_pending.push_back(std::move(shot));

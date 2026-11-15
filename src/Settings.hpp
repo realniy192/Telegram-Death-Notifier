@@ -46,6 +46,11 @@ struct GlobalCfg {
     int completeDelayMs = 1200;
     int deathDelayMs = 0;
     int uploadTimeout = 45;
+    bool streakEnabled = true;
+    int streakMin = 2;
+    int streakMode = 2; // 0 Separate, 1 Replace, 2 Combine
+    std::string streakSameMessage;
+    std::string streakMixedMessage;
     bool operator==(GlobalCfg const&) const = default;
 };
 
@@ -66,6 +71,8 @@ void saveLevelCfg(LevelRef const& level, LevelCfg const& cfg);
 GlobalCfg loadGlobalCfg();
 void saveGlobalCfg(GlobalCfg const& cfg);
 int currentDecimalPlaces();
+// 0 Separate, 1 Replace, 2 Combine (see StreakMode)
+int currentStreakMode();
 std::vector<RunEntry> collectRunEntries(PlayLayer* layer);
 std::string formatTemplate(std::string text, std::string const& fallback,
     std::vector<std::pair<std::string, std::string>> const& variables);

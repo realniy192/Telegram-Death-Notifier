@@ -101,6 +101,47 @@
       "default": "{player} got a new best of {percent}% on {level}!",
       "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
     },
+    "msg-streak-same": {
+      "type": "string",
+      "name": "Streak message (same run)",
+      "description": "Same run in a row. Placeholders: {player}, {level}, {run}, {count}",
+      "default": "{player} did {run}% on {level} {count}x in a row",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
+    "msg-streak-mixed": {
+      "type": "string",
+      "name": "Streak message (different runs)",
+      "description": "Different runs in a row. Placeholders: {player}, {level}, {runs}, {count}",
+      "default": "{player} got {runs} on {level} back to back",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
+    "streak-enabled": {
+      "type": "bool",
+      "name": "Post streaks",
+      "description": "Progresses in a row with no plain death in between.",
+      "default": true
+    },
+    "streak-min": {
+      "type": "int",
+      "name": "Streak: post from",
+      "description": "How many progresses in a row start a streak.",
+      "default": 2,
+      "min": 2,
+      "max": 20,
+      "enable-if": "streak-enabled"
+    },
+    "streak-mode": {
+      "type": "string",
+      "name": "Streak message mode",
+      "description": "Separate: run photo, then streak text. Replace: streak caption only. Combine: one caption with both.",
+      "default": "Combine",
+      "one-of": [
+        "Separate",
+        "Replace",
+        "Combine"
+      ],
+      "enable-if": "streak-enabled"
+    },
     "custom-nickname": {
       "type": "bool",
       "name": "Use custom nickname",

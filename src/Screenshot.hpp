@@ -4,9 +4,15 @@
 
 namespace tg {
 
+struct ShotText {
+    std::string caption;  // empty: photo without caption
+    std::string followUp; // optional text message sent right after the photo
+};
+
 struct ShotRequest {
-    std::string caption; // empty: photo without caption
-    int delayMs = 0;     // wait before capturing (death screenshots)
+    std::string caption;  // empty: photo without caption
+    int delayMs = 0;      // wait before capturing (death screenshots)
+    std::string followUp; // optional text message sent right after the photo
 };
 
 // Queue a screenshot for a completed frame. Safe to call from any thread.

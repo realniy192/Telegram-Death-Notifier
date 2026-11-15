@@ -9,6 +9,12 @@ using namespace geode::prelude;
 
 namespace {
 constexpr char kBlacklistKey[] = "blacklist";
+constexpr char const* kStreakModes[] = {"Separate", "Replace", "Combine"};
+
+int streakModeIndex(std::string const& name) {
+    for (int i = 0; i < 3; ++i) if (name == kStreakModes[i]) return i;
+    return 2;
+}
 
 std::string savedName(std::string const& level, std::string const& suffix) {
     return fmt::format("lvl-{}-{}", level, suffix);
@@ -98,6 +104,11 @@ tg::GlobalCfg tg::loadGlobalCfg() {
     cfg.completeDelayMs = intSetting("complete-delay-ms", 0, 5000);
     cfg.deathDelayMs = intSetting("death-delay-ms", 0, 1000);
     cfg.uploadTimeout = intSetting("upload-timeout", 5, 120);
+    cfg.streakEnabled = mod->getSettingValue<bool>("streak-enabled");
+    cfg.streakMin = intSetting("streak-min", 2, 20);
+    cfg.streakMode = streakModeIndex(mod->getSettingValue<std::string>("streak-mode"));
+    cfg.streakSameMessage = mod->getSettingValue<std::string>("msg-streak-same");
+    cfg.streakMixedMessage = mod->getSettingValue<std::string>("msg-streak-mixed");
     return cfg;
 }
 
@@ -124,11 +135,20 @@ void tg::saveGlobalCfg(GlobalCfg const& cfg) {
     mod->setSettingValue<int64_t>("complete-delay-ms", cfg.completeDelayMs);
     mod->setSettingValue<int64_t>("death-delay-ms", cfg.deathDelayMs);
     mod->setSettingValue<int64_t>("upload-timeout", cfg.uploadTimeout);
+    mod->setSettingValue<bool>("streak-enabled", cfg.streakEnabled);
+    mod->setSettingValue<int64_t>("streak-min", cfg.streakMin);
+    mod->setSettingValue<std::string>("streak-mode", kStreakModes[std::clamp(cfg.streakMode, 0, 2)]);
+    mod->setSettingValue<std::string>("msg-streak-same", cfg.streakSameMessage);
+    mod->setSettingValue<std::string>("msg-streak-mixed", cfg.streakMixedMessage);
 }
 
 int tg::currentDecimalPlaces() {
     auto mod = Mod::get();
     return mod->getSettingValue<bool>("show-decimals") ? intSetting("decimal-places", 1, 4) : 0;
+}
+
+int tg::currentStreakMode() {
+    return streakModeIndex(Mod::get()->getSettingValue<std::string>("streak-mode"));
 }
 
 std::vector<tg::RunEntry> tg::collectRunEntries(PlayLayer* layer) {

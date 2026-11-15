@@ -1,5 +1,6 @@
 #include "SettingsPopup.hpp"
 #include "Settings.hpp"
+#include "AttemptsPopup.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/ui/Notification.hpp>
@@ -173,6 +174,8 @@ class SettingsPopup : public Popup {
     };
 
     tg::LevelRef m_levelRef;
+    PlayLayer* m_playLayer = nullptr;
+    std::vector<Choice> m_streakModes;
     tg::LevelCfg m_level, m_originalLevel;
     tg::GlobalCfg m_global, m_originalGlobal;
     bool m_blacklistCurrent = false, m_originalBlacklistCurrent = false;
@@ -400,7 +403,9 @@ class SettingsPopup : public Popup {
         struct Item { char const* tag; char const* meaning; };
         Item const items[] = {
             {"{player}", "Your Name"}, {"{level}", "Level Name"}, {"{percent}", "Run %"},
-            {"{start}", "Run Start %"}, {"{end}", "Run End %"},
+            {"{start}", "Run Start %"}, {"{end}", "Run End %"}, {"{attempts}", "GD attempts"},
+            {"{total_attempts}", "All attempts"}, {"{count}", "Streak length"},
+            {"{run}", "Streak run"}, {"{runs}", "Streak runs"},
         };
         constexpr int columns = 3;
         constexpr int count = sizeof(items) / sizeof(items[0]);
@@ -560,7 +565,7 @@ class SettingsPopup : public Popup {
     }
 
     float runsHeight() const {
-        return std::max(290.f, 218.f + m_entries.size() * 32.f);
+        return std::max(320.f, 248.f + m_entries.size() * 32.f);
     }
 
     float extraHeight() const {
@@ -569,7 +574,7 @@ class SettingsPopup : public Popup {
 
     void layoutRuns() {
         auto& page = m_pages[TabRuns];
-        float height = m_level.mode == tg::RunMode::MinimumProgress ? 300.f
+        float height = m_level.mode == tg::RunMode::MinimumProgress ? 330.f
             : std::max(page.scroll->getContentHeight(), runsHeight());
         page.content->setPositionY(height - page.contentHeight);
         page.scroll->m_contentLayer->setContentHeight(height);
@@ -592,6 +597,8 @@ class SettingsPopup : public Popup {
         toggle(page.content, "Enabled for this level", m_level.enabled, nextRow(page, 32.f));
         toggle(page.content, "Blacklist this level", m_blacklistCurrent, nextRow(page, 32.f));
         note(page, "*Blacklisted:*  nothing is sent or tracked on this level.", 16.f);
+        button(page.content, "Attempts & linked copies", {m_width / 2, nextRow(page, 30.f)},
+               menu_selector(SettingsPopup::onAttempts), 170.f, 22.f);
         spacer(page, 4.f);
 
         float y = nextRow(page, 34.f);
@@ -709,7 +716,9 @@ class SettingsPopup : public Popup {
                 {"player", player}, {"level", "Stereo Madness"},
                 {"start", tg::formatPercent(tg::percentUnits(run ? 4.25 : 0, digits), digits)},
                 {"end", tg::formatPercent(tg::percentUnits(54.32, digits), digits)},
-                {"percent", tg::formatPercent(tg::percentUnits(54.32, digits), digits)}
+                {"percent", tg::formatPercent(tg::percentUnits(54.32, digits), digits)},
+                {"attempts", "1234"}, {"total_attempts", "1530"}, {"count", "3"},
+                {"run", "58-67"}, {"runs", "54-70, 54-73, 54-83"}
             });
             node->setText("Preview: " + value);
         });
@@ -727,12 +736,48 @@ class SettingsPopup : public Popup {
         textField(page, "Level complete message", m_global.beatMessage, kMessageChars);
         preview(page, m_global.beatMessage, "{player} beat {level}!", false);
         spacer(page, 4.f);
+        buildStreaks(page);
+        spacer(page, 4.f);
         section(page, "Nickname");
         toggle(page.content, "Use custom nickname", m_global.customNickname, nextRow(page, 32.f));
         auto nickname = textField(page, "Nickname", m_global.nickname,
             " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.");
         m_refresh.push_back([this, nickname] { nickname->setEnabled(m_global.customNickname); });
         note(page, "Previews are local - nothing is sent.");
+    }
+
+    void buildStreaks(Page& page) {
+        section(page, "Streaks", "Progress in a row");
+        toggle(page.content, "Post streaks", m_global.streakEnabled, nextRow(page, 32.f));
+        numberField(page.content, "Post from this many in a row (2-20)", m_global.streakMin,
+                    nextRow(page, 34.f), 2, 20);
+        auto minimum = m_numbers.back().input;
+        note(page, "Every new progress after that posts again. A plain death breaks the streak.");
+        float y = nextRow(page, 32.f);
+        auto menu = PageMenu::create();
+        menu->setPosition({0, 0});
+        page.content->addChild(menu);
+        char const* names[] = {"Separate", "Replace", "Combine"};
+        float gap = 8.f;
+        float width = std::min(110.f, (m_width - 16.f - gap * 2) / 3);
+        for (int i = 0; i < 3; ++i) {
+            auto choice = choiceButton(menu, names[i], {m_width / 2 + (i - 1) * (width + gap), y},
+                width, 22.f, menu_selector(SettingsPopup::onStreakMode));
+            choice.button->setTag(i);
+            m_streakModes.push_back(choice);
+        }
+        m_refresh.push_back([this, minimum] {
+            minimum->setEnabled(m_global.streakEnabled);
+            for (int i = 0; i < (int)m_streakModes.size(); ++i) {
+                setSelected(m_streakModes[i], m_global.streakMode == i);
+                m_streakModes[i].button->setEnabled(m_global.streakEnabled);
+            }
+        });
+        note(page, "*Separate:* run photo + streak text   *Replace:* streak only   *Combine:* one caption", 16.f);
+        textField(page, "Same run in a row", m_global.streakSameMessage, kMessageChars);
+        preview(page, m_global.streakSameMessage, "{player} did {run}% on {level} {count}x in a row", true);
+        textField(page, "Different runs in a row", m_global.streakMixedMessage, kMessageChars);
+        preview(page, m_global.streakMixedMessage, "{player} got {runs} on {level} back to back", true);
     }
 
     void buildExtra(Page& page) {
@@ -850,6 +895,7 @@ class SettingsPopup : public Popup {
         if (m_closeBtn) m_closeBtn->setPosition(m_closeBtn->getPosition() + CCPoint{4.f, -4.f});
         m_width = width - 24.f;
         m_levelRef = tg::LevelRef::from(layer->m_level);
+        m_playLayer = layer;
         m_global = tg::loadGlobalCfg();
         m_level = tg::loadLevelCfg(m_levelRef);
         m_blacklist = tg::loadBlacklist();
@@ -902,7 +948,7 @@ class SettingsPopup : public Popup {
         float heights[kTabCount] = {};
         heights[TabRuns] = runsHeight();
         heights[TabTelegram] = 250.f;
-        heights[TabMessages] = 480.f;
+        heights[TabMessages] = 860.f;
         heights[TabExtra] = extraHeight();
         for (int i = 0; i < kTabCount; ++i) {
             auto scroll = ScrollLayer::create({m_width, scrollHeight});
@@ -969,6 +1015,14 @@ public:
         else m_removedBlacklist.erase(key);
         setSelected(m_blacklistRows.at(key), removed);
         changed();
+    }
+    void onStreakMode(CCObject* sender) {
+        m_global.streakMode = std::clamp(sender->getTag(), 0, 2);
+        changed();
+    }
+    void onAttempts(CCObject*) {
+        defocus();
+        if (m_playLayer && m_playLayer->m_level) tg::openAttempts(m_playLayer->m_level);
     }
     void onApply(CCObject*) { apply(); }
     void onClose(CCObject* sender) override {
