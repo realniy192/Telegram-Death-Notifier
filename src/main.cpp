@@ -4,28 +4,28 @@
 #include <Geode/modify/EndLevelLayer.hpp>
 #include "Attempts.hpp"
 #include "Journal.hpp"
+#include "RatingPanel.hpp"
 #include "Settings.hpp"
 #include "SettingsPopup.hpp"
 #include "Screenshot.hpp"
+#include "Stats.hpp"
 #include "Streak.hpp"
 
 using namespace geode::prelude;
-
-static std::string nickname() {
-    auto mod = Mod::get();
-    if (mod->getSettingValue<bool>("custom-nickname")) {
-        auto custom = std::string(utils::string::trim(mod->getSettingValue<std::string>("nickname")));
-        if (!custom.empty()) return custom;
-    }
-    std::string name = GJAccountManager::get()->m_username;
-    return name.empty() ? "Player" : name;
-}
 
 static int intSetting(char const* key, int min, int max) {
     return std::clamp((int)Mod::get()->getSettingValue<int64_t>(key), min, max);
 }
 
-static std::optional<tg::ShotRequest> g_pendingWin;
+// Level complete post, taken on the end screen.
+struct PendingWin {
+    tg::ShotRequest request;
+    bool rate = false;
+    bool enjoyment = false;
+    bool experience = false;
+};
+
+static std::optional<PendingWin> g_pendingWin;
 
 // ======================= gameplay =======================
 class $modify(TGPlayLayer, PlayLayer) {
@@ -33,6 +33,8 @@ class $modify(TGPlayLayer, PlayLayer) {
         tg::RunTracking run;
         tg::StreakTracker streak;
         tg::LevelRef ref;
+        tg::stats::Snapshot snapshot;
+        bool hasSnapshot = false;
         bool resetting = false;
         bool restoredCheckpoint = false;
         bool handlingCollision = false;
@@ -78,20 +80,20 @@ class $modify(TGPlayLayer, PlayLayer) {
 
     std::vector<std::pair<std::string, std::string>> baseVars() {
         return {
-            { "player", nickname() }, { "level", std::string(m_level->m_levelName) },
+            { "player", tg::playerName() }, { "level", std::string(m_level->m_levelName) },
             { "attempts", std::to_string(tg::gdAttempts(m_level)) },
             { "total_attempts", std::to_string(tg::attemptTotals(m_fields->ref, m_level).total()) }
         };
     }
 
-    std::string runCaption(tg::RunResult const& run, bool completed, int previousBest) {
+    std::string runCaption(tg::RunResult const& run, Kind kind) {
         auto vars = baseVars();
         vars.push_back({ "start", tg::formatPercent(run.start, run.decimalPlaces) });
         vars.push_back({ "end", tg::formatPercent(run.end, run.decimalPlaces) });
         vars.push_back({ "percent", tg::formatPercent(run.end, run.decimalPlaces) });
         char const* setting;
         char const* fallback;
-        switch (captionKind(run, completed, previousBest)) {
+        switch (kind) {
             case Kind::Run:
                 setting = "msg-run";
                 fallback = "{player} got a {start}-{end}% run on {level}.";
@@ -111,6 +113,44 @@ class $modify(TGPlayLayer, PlayLayer) {
         }
         return tg::formatTemplate(Mod::get()->getSettingValue<std::string>(setting), fallback, vars);
     }
+
+    // ---------- stats ----------
+
+    tg::stats::LevelData levelData() {
+        if (!m_fields->hasSnapshot) return {};
+        return tg::stats::currentData(m_fields->snapshot, m_fields->ref);
+    }
+
+    std::string withStats(std::string caption, Kind kind, tg::stats::Config const& cfg) {
+        bool attach = (kind == Kind::Beat && cfg.onComplete) || (kind == Kind::Run && cfg.onRuns);
+        if (!attach || !m_fields->hasSnapshot) return caption;
+        auto data = levelData();
+        int attempts = cfg.attemptsFromDT && data.dtAttempts >= 0
+            ? data.dtAttempts : tg::attemptTotals(m_fields->ref, m_level).total();
+        auto block = tg::stats::block(cfg, data, attempts);
+        if (block.empty()) return caption;
+        return caption.empty() ? block : caption + "\n\n" + block;
+    }
+
+    std::optional<std::string> nRunsMessage(tg::stats::Config const& cfg) {
+        if (!cfg.nRuns || !m_fields->hasSnapshot) return std::nullopt;
+        auto chain = tg::stats::minRuns(levelData());
+        auto count = tg::stats::improvedChain(m_fields->ref, chain);
+        if (!count) return std::nullopt;
+        auto vars = baseVars();
+        vars.push_back({ "n", std::to_string(*count) });
+        vars.push_back({ "chain", tg::stats::chainLabel(chain) });
+        return tg::formatTemplate(cfg.nRunsMessage, "{player} can now beat {level} in {n} runs: {chain}", vars);
+    }
+
+    // Rides along with this attempt's post, or goes out alone as text.
+    void attachNRuns(std::optional<tg::ShotRequest>& shot, std::optional<std::string> message) {
+        if (!message) return;
+        if (shot) shot->followUp = shot->followUp.empty() ? *message : shot->followUp + "\n\n" + *message;
+        else tg::sendTelegramText(std::move(*message));
+    }
+
+    // ---------- streaks ----------
 
     // Adds a qualifying progress; returns the streak text once it is long enough.
     std::optional<std::string> extendStreak(tg::RunResult const& run) {
@@ -185,6 +225,10 @@ class $modify(TGPlayLayer, PlayLayer) {
             tg::journal::beginVisit(m_fields->ref);
             m_fields->journaling = true;
             syncAttempts();
+            m_fields->snapshot = tg::stats::takeSnapshot(m_fields->ref);
+            m_fields->hasSnapshot = true;
+            // Existing history only sets the baseline; later improvements post.
+            tg::stats::initChain(m_fields->ref, levelData());
         }
         return true;
     }
@@ -232,16 +276,7 @@ class $modify(TGPlayLayer, PlayLayer) {
         // Read before the original call: GD updates the best inside it.
         int previousBest = m_level->m_normalPercent.value();
         auto result = m_fields->run.collide(percent, tg::currentDecimalPlaces(), m_gameState.m_levelTime);
-        std::optional<tg::ShotRequest> shot;
-        if (result) {
-            if (tg::shouldNotify(*result, filters, previousBest, m_isPracticeMode, false)) {
-                auto caption = runCaption(*result, false, previousBest);
-                auto streak = extendStreak(*result);
-                shot = compose(std::move(caption), std::move(streak), intSetting("death-delay-ms", 0, 1000));
-            }
-            // Any collision that is not a progress (noclip included) breaks the streak.
-            else m_fields->streak.reset();
-        }
+        bool qualifies = result && tg::shouldNotify(*result, filters, previousBest, m_isPracticeMode, false);
         PlayLayer::destroyPlayer(player, obj);
         bool actuallyDead = (player && player->m_isDead) || (m_player1 && m_player1->m_isDead) ||
             (m_gameState.m_isDualMode && m_player2 && m_player2->m_isDead);
@@ -250,6 +285,20 @@ class $modify(TGPlayLayer, PlayLayer) {
             m_fields->run.continueAfterCollision(percent);
         }
         m_fields->handlingCollision = false;
+        if (!result) return;
+
+        // The caption is built after the journal update, so stats include this death.
+        auto cfg = tg::stats::load();
+        std::optional<tg::ShotRequest> shot;
+        if (qualifies) {
+            auto kind = captionKind(*result, false, previousBest);
+            auto caption = withStats(runCaption(*result, kind), kind, cfg);
+            auto streak = extendStreak(*result);
+            shot = compose(std::move(caption), std::move(streak), intSetting("death-delay-ms", 0, 1000));
+        }
+        // Any collision that is not a progress (noclip included) breaks the streak.
+        else m_fields->streak.reset();
+        if (actuallyDead && filters.levelEnabled) attachNRuns(shot, nRunsMessage(cfg));
         if (shot) tg::queueScreenshot(std::move(*shot));
     }
 
@@ -265,12 +314,25 @@ class $modify(TGPlayLayer, PlayLayer) {
             g_pendingWin.reset();
             journalResult(*run);
             countAttemptTime();
-            if (tg::shouldNotify(*run, currentFilters(), previousBest, m_isPracticeMode, true)) {
-                auto caption = runCaption(*run, true, previousBest);
+            auto filters = currentFilters();
+            auto cfg = tg::stats::load();
+            auto kind = captionKind(*run, true, previousBest);
+            std::optional<tg::ShotRequest> shot;
+            if (tg::shouldNotify(*run, filters, previousBest, m_isPracticeMode, true)) {
+                auto caption = withStats(runCaption(*run, kind), kind, cfg);
                 auto streak = extendStreak(*run);
-                g_pendingWin = compose(std::move(caption), std::move(streak), 0);
+                shot = compose(std::move(caption), std::move(streak), 0);
             }
             else m_fields->streak.reset();
+            if (filters.levelEnabled) attachNRuns(shot, nRunsMessage(cfg));
+            if (shot) {
+                PendingWin win;
+                win.request = std::move(*shot);
+                win.enjoyment = kind == Kind::Beat && cfg.askEnjoyment;
+                win.experience = kind == Kind::Beat && cfg.askExperience;
+                win.rate = win.enjoyment || win.experience;
+                g_pendingWin = std::move(win);
+            }
         }
         PlayLayer::levelComplete();
     }
@@ -288,9 +350,34 @@ class $modify(TGEndLayer, EndLevelLayer) {
 
     void onTGShot(float) {
         if (!g_pendingWin) return;
-        auto request = std::move(*g_pendingWin);
+        auto win = std::move(*g_pendingWin);
         g_pendingWin.reset();
-        tg::queueScreenshot(std::move(request));
+        if (!win.rate) {
+            tg::queueScreenshot(std::move(win.request));
+            return;
+        }
+        // Capture first, then show the rating panel, so it is never in the shot.
+        auto request = std::move(win.request);
+        auto caption = request.caption;
+        auto followUp = request.followUp;
+        auto ticket = std::make_shared<uint64_t>(0);
+        request.deferred = true;
+        this->retain();
+        request.onCaptured = [this, ticket, caption, followUp, enjoyment = win.enjoyment,
+                              experience = win.experience]() {
+            auto resolve = [ticket, caption, followUp](tg::RatingResult result) {
+                auto text = caption;
+                auto lines = tg::stats::ratingLines({result.enjoyment, result.experience});
+                if (!lines.empty()) text += (text.empty() ? "" : "\n") + lines;
+                tg::resolveDeferredScreenshot(*ticket, {text, followUp});
+            };
+            if (this->isRunning() && m_mainLayer) tg::showRatingPanel(m_mainLayer, enjoyment, experience, resolve);
+            else resolve({});
+            this->release();
+        };
+        *ticket = tg::queueScreenshot(std::move(request));
+        // Dropped: the capture callback will never run.
+        if (!*ticket) this->release();
     }
 };
 

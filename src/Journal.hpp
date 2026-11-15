@@ -32,5 +32,11 @@ LevelStats stats(Scope scope, std::string const& levelKey = "");
 // Local calendar day, "YYYY-MM-DD".
 std::string today();
 void flush();
+// Per level for one scope (LevelVisit: just the current level).
+std::map<std::string, LevelStats> perLevel(Scope scope);
+// Every saved day for one level (flushes first).
+LevelStats allTime(std::string const& levelKey);
+// Key of the level being recorded, empty outside a level.
+std::string currentKey();
 
 }

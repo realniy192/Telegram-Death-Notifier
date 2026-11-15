@@ -73,6 +73,8 @@ void saveGlobalCfg(GlobalCfg const& cfg);
 int currentDecimalPlaces();
 // 0 Separate, 1 Replace, 2 Combine (see StreakMode)
 int currentStreakMode();
+// Custom nickname when enabled, otherwise the GD username.
+std::string playerName();
 std::vector<RunEntry> collectRunEntries(PlayLayer* layer);
 std::string formatTemplate(std::string text, std::string const& fallback,
     std::vector<std::pair<std::string, std::string>> const& variables);

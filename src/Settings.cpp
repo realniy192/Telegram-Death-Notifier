@@ -147,6 +147,16 @@ int tg::currentDecimalPlaces() {
     return mod->getSettingValue<bool>("show-decimals") ? intSetting("decimal-places", 1, 4) : 0;
 }
 
+std::string tg::playerName() {
+    auto mod = Mod::get();
+    if (mod->getSettingValue<bool>("custom-nickname")) {
+        auto custom = std::string(utils::string::trim(mod->getSettingValue<std::string>("nickname")));
+        if (!custom.empty()) return custom;
+    }
+    std::string name = GJAccountManager::get()->m_username;
+    return name.empty() ? "Player" : name;
+}
+
 int tg::currentStreakMode() {
     return streakModeIndex(Mod::get()->getSettingValue<std::string>("streak-mode"));
 }

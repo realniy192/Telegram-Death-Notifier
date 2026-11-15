@@ -1,6 +1,8 @@
 #include "SettingsPopup.hpp"
 #include "Settings.hpp"
 #include "AttemptsPopup.hpp"
+#include "DeathTracker.hpp"
+#include "Stats.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/ui/Notification.hpp>
@@ -39,9 +41,9 @@ constexpr ccColor3B kOkColor = {120, 230, 140};
 constexpr ccColor3B kWarnColor = {255, 205, 90};
 constexpr ccColor3B kErrorColor = {255, 110, 110};
 
-// Page order. Stage 3 inserts a Stats tab right after Runs.
-enum Tab { TabRuns, TabTelegram, TabMessages, TabExtra, kTabCount };
-constexpr char const* kTabTitles[kTabCount] = {"Runs", "Telegram", "Messages", "Extra"};
+// Page order.
+enum Tab { TabRuns, TabStats, TabTelegram, TabMessages, TabExtra, kTabCount };
+constexpr char const* kTabTitles[kTabCount] = {"Runs", "Stats", "Telegram", "Messages", "Extra"};
 
 ScrollLayer* parentScroll(CCNode* node) {
     for (auto parent = node->getParent(); parent; parent = parent->getParent()) {
@@ -176,6 +178,9 @@ class SettingsPopup : public Popup {
     tg::LevelRef m_levelRef;
     PlayLayer* m_playLayer = nullptr;
     std::vector<Choice> m_streakModes;
+    tg::stats::Config m_stats, m_originalStats;
+    std::vector<Choice> m_scopeChoices;
+    std::vector<Choice> m_attemptSources;
     tg::LevelCfg m_level, m_originalLevel;
     tg::GlobalCfg m_global, m_originalGlobal;
     bool m_blacklistCurrent = false, m_originalBlacklistCurrent = false;
@@ -405,7 +410,8 @@ class SettingsPopup : public Popup {
             {"{player}", "Your Name"}, {"{level}", "Level Name"}, {"{percent}", "Run %"},
             {"{start}", "Run Start %"}, {"{end}", "Run End %"}, {"{attempts}", "GD attempts"},
             {"{total_attempts}", "All attempts"}, {"{count}", "Streak length"},
-            {"{run}", "Streak run"}, {"{runs}", "Streak runs"},
+            {"{run}", "Streak run"}, {"{runs}", "Streak runs"}, {"{n}", "Runs needed"},
+            {"{chain}", "Run chain"},
         };
         constexpr int columns = 3;
         constexpr int count = sizeof(items) / sizeof(items[0]);
@@ -535,6 +541,7 @@ class SettingsPopup : public Popup {
     bool dirty() const {
         if (!(m_global == m_originalGlobal) || !(m_level == m_originalLevel)) return true;
         if (m_blacklistCurrent != m_originalBlacklistCurrent || !m_removedBlacklist.empty()) return true;
+        if (!(m_stats == m_originalStats)) return true;
         for (auto const& field : m_numbers) {
             if (std::string(field.input->getString()) != std::to_string(*field.value)) return true;
         }
@@ -718,7 +725,8 @@ class SettingsPopup : public Popup {
                 {"end", tg::formatPercent(tg::percentUnits(54.32, digits), digits)},
                 {"percent", tg::formatPercent(tg::percentUnits(54.32, digits), digits)},
                 {"attempts", "1234"}, {"total_attempts", "1530"}, {"count", "3"},
-                {"run", "58-67"}, {"runs", "54-70, 54-73, 54-83"}
+                {"run", "58-67"}, {"runs", "54-70, 54-73, 54-83"},
+                {"n", "3"}, {"chain", "14%, 13-45%, 45-100%"}
             });
             node->setText("Preview: " + value);
         });
@@ -744,6 +752,102 @@ class SettingsPopup : public Popup {
             " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.");
         m_refresh.push_back([this, nickname] { nickname->setEnabled(m_global.customNickname); });
         note(page, "Previews are local - nothing is sent.");
+    }
+
+    CCMenu* pageMenu(Page& page) {
+        auto menu = PageMenu::create();
+        menu->setPosition({0, 0});
+        page.content->addChild(menu);
+        return menu;
+    }
+
+    void buildStats(Page& page) {
+        section(page, "Stats", "Shared by all levels");
+        toggle(page.content, "Attach to level complete (100%)", m_stats.onComplete, nextRow(page, 32.f));
+        toggle(page.content, "Attach to runs", m_stats.onRuns, nextRow(page, 32.f));
+        if (tg::dt::available()) {
+            note(page, fmt::format("*Death Tracker {}* found: deaths, runs and playtime come from it.",
+                tg::dt::versionString()), 16.f);
+        }
+        else note(page, "*Death Tracker* is not installed: the mod's own journal is used.", 16.f);
+        spacer(page, 4.f);
+
+        section(page, "Metrics", "Each one can be turned off");
+        toggle(page.content, "Deaths after List %", m_stats.listDeaths, nextRow(page, 32.f));
+        numberField(page.content, "List % (1-100)", m_stats.listPercent, nextRow(page, 34.f), 1, 100);
+        auto list = m_numbers.back().input;
+        toggle(page.content, "Deaths after Custom %", m_stats.customDeaths, nextRow(page, 32.f));
+        numberField(page.content, "Custom % (1-100)", m_stats.customPercent, nextRow(page, 34.f), 1, 100);
+        auto custom = m_numbers.back().input;
+        toggle(page.content, "Attempts", m_stats.attempts, nextRow(page, 32.f));
+        {
+            float y = nextRow(page, 32.f);
+            auto menu = pageMenu(page);
+            char const* names[] = {"From GD", "From Death Tracker"};
+            float gap = 8.f, width = std::min(150.f, (m_width - 16.f - gap) / 2);
+            for (int i = 0; i < 2; ++i) {
+                auto choice = choiceButton(menu, names[i], {m_width / 2 + (i - .5f) * (width + gap), y},
+                    width, 22.f, menu_selector(SettingsPopup::onAttemptSource));
+                choice.button->setTag(i);
+                m_attemptSources.push_back(choice);
+            }
+        }
+        note(page, "*From GD* includes linked copies and lost attempts.", 16.f);
+        toggle(page.content, "Playtime", m_stats.playtime, nextRow(page, 32.f));
+        toggle(page.content, "Worst fail", m_stats.worstFail, nextRow(page, 32.f));
+        toggle(page.content, "Best runs to 100%", m_stats.bestRuns, nextRow(page, 32.f));
+        numberField(page.content, "Runs to show (1-10)", m_stats.bestRunsCount, nextRow(page, 34.f), 1, 10);
+        auto bestCount = m_numbers.back().input;
+        numberField(page.content, "Minimum run length %", m_stats.bestRunsMinLength, nextRow(page, 34.f), 0, 100);
+        auto bestLength = m_numbers.back().input;
+        note(page, "Hides short runs: with [20], *90-100* is not listed.", 16.f);
+        toggle(page.content, "Ask Enjoyment on 100%", m_stats.askEnjoyment, nextRow(page, 32.f));
+        toggle(page.content, "Ask Experience on 100%", m_stats.askExperience, nextRow(page, 32.f));
+        note(page, "A small panel on the complete screen; the post waits for it.", 16.f);
+        spacer(page, 4.f);
+
+        section(page, "Level in N runs");
+        toggle(page.content, "Post when fewer runs are needed", m_stats.nRuns, nextRow(page, 32.f));
+        textField(page, "Message", m_stats.nRunsMessage, kMessageChars);
+        preview(page, m_stats.nRunsMessage, "{player} can now beat {level} in {n} runs: {chain}", false);
+        note(page, "Overlapping runs from [0%] to [100%]. Never posted for a full run.", 16.f);
+        spacer(page, 4.f);
+
+        section(page, "Session summary");
+        {
+            float y = nextRow(page, 32.f);
+            auto menu = pageMenu(page);
+            char const* names[] = {"Level visit", "Game launch", "Today"};
+            float gap = 8.f, width = std::min(110.f, (m_width - 16.f - gap * 2) / 3);
+            for (int i = 0; i < 3; ++i) {
+                auto choice = choiceButton(menu, names[i], {m_width / 2 + (i - 1) * (width + gap), y},
+                    width, 22.f, menu_selector(SettingsPopup::onScope));
+                choice.button->setTag(i);
+                m_scopeChoices.push_back(choice);
+            }
+        }
+        if (tg::dt::available()) {
+            note(page, "*Today* uses Death Tracker sessions; attempts come from the journal.", 16.f);
+            if (tg::dt::sessionMethod() == "Exit game") {
+                note(page, "For exact days, set Death Tracker *Session Method* to [Exit level].", 16.f);
+            }
+        }
+        button(page.content, "Send summary now", {m_width / 2, nextRow(page, 32.f)},
+               menu_selector(SettingsPopup::onSendSummary), 150.f, 22.f);
+
+        m_refresh.push_back([this, list, custom, bestCount, bestLength] {
+            list->setEnabled(m_stats.listDeaths);
+            custom->setEnabled(m_stats.customDeaths);
+            bestCount->setEnabled(m_stats.bestRuns);
+            bestLength->setEnabled(m_stats.bestRuns);
+            for (int i = 0; i < (int)m_attemptSources.size(); ++i) {
+                setSelected(m_attemptSources[i], m_stats.attemptsFromDT == (i == 1));
+                m_attemptSources[i].button->setEnabled(m_stats.attempts && (i == 0 || tg::dt::available()));
+            }
+            for (int i = 0; i < (int)m_scopeChoices.size(); ++i) {
+                setSelected(m_scopeChoices[i], m_stats.sessionScope == i);
+            }
+        });
     }
 
     void buildStreaks(Page& page) {
@@ -876,6 +980,8 @@ class SettingsPopup : public Popup {
             }
         }
         m_removedBlacklist.clear();
+        if (!(m_stats == m_originalStats)) tg::stats::save(m_stats);
+        m_originalStats = m_stats;
         m_originalGlobal = m_global;
         m_originalLevel = m_level;
         m_originalBlacklistCurrent = m_blacklistCurrent;
@@ -897,6 +1003,8 @@ class SettingsPopup : public Popup {
         m_levelRef = tg::LevelRef::from(layer->m_level);
         m_playLayer = layer;
         m_global = tg::loadGlobalCfg();
+        m_stats = tg::stats::load();
+        m_originalStats = m_stats;
         m_level = tg::loadLevelCfg(m_levelRef);
         m_blacklist = tg::loadBlacklist();
         m_blacklistCurrent = m_blacklist.contains(m_levelRef.key);
@@ -947,6 +1055,7 @@ class SettingsPopup : public Popup {
         float scrollHeight = viewHeight - inset * 2;
         float heights[kTabCount] = {};
         heights[TabRuns] = runsHeight();
+        heights[TabStats] = 1040.f;
         heights[TabTelegram] = 250.f;
         heights[TabMessages] = 860.f;
         heights[TabExtra] = extraHeight();
@@ -963,6 +1072,7 @@ class SettingsPopup : public Popup {
             m_pages.push_back({scroll, content, heights[i] - 2.f, heights[i]});
         }
         buildRuns(m_pages[TabRuns], layer);
+        buildStats(m_pages[TabStats]);
         buildTelegram(m_pages[TabTelegram]);
         buildMessages(m_pages[TabMessages]);
         buildExtra(m_pages[TabExtra]);
@@ -1019,6 +1129,19 @@ public:
     void onStreakMode(CCObject* sender) {
         m_global.streakMode = std::clamp(sender->getTag(), 0, 2);
         changed();
+    }
+    void onAttemptSource(CCObject* sender) {
+        m_stats.attemptsFromDT = sender->getTag() == 1;
+        changed();
+    }
+    void onScope(CCObject* sender) {
+        m_stats.sessionScope = std::clamp(sender->getTag(), 0, 2);
+        changed();
+    }
+    void onSendSummary(CCObject*) {
+        defocus();
+        tg::stats::sendSummary(m_stats.sessionScope, tg::playerName());
+        Notification::create("Session summary is being sent", NotificationIcon::Success)->show();
     }
     void onAttempts(CCObject*) {
         defocus();

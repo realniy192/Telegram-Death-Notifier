@@ -188,6 +188,34 @@ void tg::journal::flush() {
     saveDay();
 }
 
+std::map<std::string, LevelStats> tg::journal::perLevel(Scope scope) {
+    auto& s = state();
+    if (scope == Scope::LevelVisit) {
+        if (!s.inVisit) return {};
+        return {{s.key, s.visit}};
+    }
+    return scope == Scope::GameLaunch ? s.launch : todayBucket();
+}
+
+LevelStats tg::journal::allTime(std::string const& levelKey) {
+    saveDay();
+    LevelStats total;
+    auto folder = Mod::get()->getSaveDir() / "journal";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(folder, ec)) return total;
+    for (auto const& entry : std::filesystem::directory_iterator(folder, ec)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".json") continue;
+        auto day = loadDay(utils::string::pathToString(entry.path().stem()));
+        if (auto it = day.find(levelKey); it != day.end()) total += it->second;
+    }
+    return total;
+}
+
+std::string tg::journal::currentKey() {
+    auto& s = state();
+    return s.inVisit ? s.key : "";
+}
+
 // The game can close straight from a level; keep the last attempts.
 class $modify(TGJournalSave, AppDelegate) {
     void trySaveGame(bool force) {

@@ -21,7 +21,10 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -685,26 +688,63 @@ bool enqueueJobs(std::vector<UploadJob> jobs) {
     return true;
 }
 
+// ---------- deferred captions ----------
+// A deferred shot is captured first and gets its caption later (rating panel).
+constexpr size_t kMaxParked = 4;
+std::mutex s_deferMutex;
+std::set<uint64_t> s_waiting;                                     // still expect a caption
+std::map<uint64_t, std::shared_ptr<QueuedPNG const>> s_parked;    // encoded, caption pending
+std::map<uint64_t, tg::ShotText> s_resolved;                      // caption came before the PNG
+
+void appendJobs(std::vector<UploadJob>& jobs, std::shared_ptr<QueuedPNG const> const& png, tg::ShotText text) {
+    if (text.caption.size() <= kPhotoCaptionLimit) jobs.push_back({png, std::move(text.caption)});
+    else {
+        jobs.push_back({png, ""});
+        jobs.push_back({nullptr, std::move(text.caption)});
+    }
+    // Follows its own photo, so the order in the channel is always right.
+    if (!text.followUp.empty()) jobs.push_back({nullptr, std::move(text.followUp)});
+}
+
+void forgetTicket(uint64_t ticket) {
+    std::lock_guard lock(s_deferMutex);
+    s_waiting.erase(ticket);
+    s_parked.erase(ticket);
+    s_resolved.erase(ticket);
+}
+
 // One PNG, one job per caption. Captions over the photo limit are sent as a
 // clean photo followed by a text message, so long stats are never rejected.
 void enqueuePhoto(ByteVector bytes, std::vector<tg::ShotText> captions, bool noCaption) {
     if (bytes.size() > freePNGBudget()) {
         log::warn("Telegram upload queue is full; encoded frame dropped");
+        for (auto const& text : captions) if (text.ticket) forgetTicket(text.ticket);
         return;
     }
     auto png = std::make_shared<QueuedPNG const>(std::move(bytes));
     std::vector<UploadJob> jobs;
-    if (noCaption || captions.empty()) jobs.push_back({png, ""});
-    else for (auto& text : captions) {
-        if (text.caption.size() <= kPhotoCaptionLimit) jobs.push_back({png, std::move(text.caption)});
-        else {
-            jobs.push_back({png, ""});
-            jobs.push_back({nullptr, std::move(text.caption)});
-        }
-        // Follows its own photo, so the order in the channel is always right.
-        if (!text.followUp.empty()) jobs.push_back({nullptr, std::move(text.followUp)});
+    if (noCaption || captions.empty()) {
+        jobs.push_back({png, ""});
+        for (auto const& text : captions) if (text.ticket) forgetTicket(text.ticket);
     }
-    enqueueJobs(std::move(jobs));
+    else for (auto& text : captions) {
+        if (text.ticket) {
+            std::lock_guard lock(s_deferMutex);
+            if (auto it = s_resolved.find(text.ticket); it != s_resolved.end()) {
+                auto resolved = std::move(it->second);
+                s_resolved.erase(it);
+                s_waiting.erase(text.ticket);
+                appendJobs(jobs, png, std::move(resolved));
+            }
+            else if (s_waiting.contains(text.ticket) && s_parked.size() < kMaxParked) {
+                s_parked[text.ticket] = png;
+            }
+            else s_waiting.erase(text.ticket);
+            continue;
+        }
+        appendJobs(jobs, png, std::move(text));
+    }
+    if (!jobs.empty()) enqueueJobs(std::move(jobs));
 }
 
 struct TemporaryPNG {
@@ -804,6 +844,7 @@ struct PendingShot {
     bool wantFallback = false; // delayed: also keep the frame of the moment it was queued
     bool flushed = false;      // level restarted before the delay passed
     std::optional<Frame> fallback;
+    std::function<void()> onCaptured;
 };
 
 std::vector<PendingShot> s_pending; // guarded by s_queueMutex
@@ -844,6 +885,12 @@ void storeFallbacks(std::vector<uint64_t> const& ids, Frame const& frame) {
     }
 }
 
+void runCallbacks(std::vector<std::function<void()>>& callbacks) {
+    for (auto& callback : callbacks) {
+        if (callback) geode::queueInMainThread(std::move(callback));
+    }
+}
+
 void capturePending() {
     // The previous frame is still encoding: keep the queue and retry next frame.
     if (s_busy.load()) return;
@@ -851,6 +898,7 @@ void capturePending() {
     std::optional<Frame> restartFrame;
     std::vector<tg::ShotText> captions;
     std::vector<uint64_t> fallbackIds;
+    std::vector<std::function<void()>> callbacks;
     {
         std::lock_guard lock(s_queueMutex);
         if (s_pending.empty()) return;
@@ -859,12 +907,14 @@ void capturePending() {
         if (flushed != s_pending.end()) {
             restartFrame = std::move(flushed->fallback);
             captions.push_back(std::move(flushed->text));
+            callbacks.push_back(std::move(flushed->onCaptured));
             s_pending.erase(flushed);
         }
         else {
             for (auto it = s_pending.begin(); it != s_pending.end();) {
                 if (it->due <= now) {
                     captions.push_back(std::move(it->text));
+                    callbacks.push_back(std::move(it->onCaptured));
                     it = s_pending.erase(it);
                     continue;
                 }
@@ -876,45 +926,82 @@ void capturePending() {
             }
         }
     }
+    std::vector<uint64_t> tickets;
+    for (auto const& text : captions) if (text.ticket) tickets.push_back(text.ticket);
+    bool captured = false;
     try {
         if (restartFrame) {
             encode(std::move(*restartFrame), std::move(captions));
-            return;
+            captured = true;
         }
-        if (captions.empty() && fallbackIds.empty()) return;
-        Frame frame;
-        if (!captureFrame(frame)) return;
-        if (!fallbackIds.empty()) storeFallbacks(fallbackIds, frame);
-        if (!captions.empty()) encode(std::move(frame), std::move(captions));
+        else if (!captions.empty() || !fallbackIds.empty()) {
+            Frame frame;
+            if (captureFrame(frame)) {
+                captured = true;
+                if (!fallbackIds.empty()) storeFallbacks(fallbackIds, frame);
+                if (!captions.empty()) encode(std::move(frame), std::move(captions));
+            }
+        }
     }
     catch (std::exception const&) {
+        captured = false;
         log::warn("Screenshot capture could not be allocated or scheduled; frame dropped");
     }
+    // A failed deferred shot will never get a photo: drop its caption slot.
+    if (!captured) for (auto ticket : tickets) forgetTicket(ticket);
+    runCallbacks(callbacks);
 }
 } // namespace
 
-void tg::queueScreenshot(ShotRequest request) {
+uint64_t tg::queueScreenshot(ShotRequest request) {
     if (request.caption.size() > kMaxCaptionBytes || request.followUp.size() > kMaxCaptionBytes) {
         log::warn("Screenshot caption exceeds queue size limit; dropped");
-        return;
+        return 0;
     }
     int delay = std::clamp(request.delayMs, 0, 5000);
     std::lock_guard lock(s_queueMutex);
     if (s_pending.size() >= kMaxCaptions) {
         log::warn("Screenshot queue is full; dropped");
-        return;
+        return 0;
     }
     try {
         PendingShot shot;
         shot.id = ++s_nextShotId;
-        shot.text = {std::move(request.caption), std::move(request.followUp)};
+        shot.text = {std::move(request.caption), std::move(request.followUp), request.deferred ? shot.id : 0};
         shot.due = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay);
         shot.wantFallback = delay > 0;
+        shot.onCaptured = std::move(request.onCaptured);
+        auto id = shot.id;
+        if (request.deferred) {
+            std::lock_guard defer(s_deferMutex);
+            s_waiting.insert(id);
+        }
         s_pending.push_back(std::move(shot));
+        return id;
     }
     catch (std::exception const&) {
         log::warn("Screenshot could not be queued; dropped");
+        return 0;
     }
+}
+
+void tg::resolveDeferredScreenshot(uint64_t ticket, ShotText text) {
+    if (!ticket) return;
+    text.ticket = 0;
+    std::vector<UploadJob> jobs;
+    {
+        std::lock_guard lock(s_deferMutex);
+        if (!s_waiting.contains(ticket)) return;
+        auto parked = s_parked.find(ticket);
+        if (parked == s_parked.end()) {
+            s_resolved[ticket] = std::move(text);
+            return;
+        }
+        appendJobs(jobs, parked->second, std::move(text));
+        s_parked.erase(parked);
+        s_waiting.erase(ticket);
+    }
+    enqueueJobs(std::move(jobs));
 }
 
 void tg::flushDelayedScreenshots() {
