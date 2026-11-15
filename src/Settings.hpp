@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Level.hpp"
 #include "RunTracking.hpp"
 #include <map>
 #include <string>
@@ -29,6 +30,7 @@ struct GlobalCfg {
     std::string deathMessage;
     std::string runMessage;
     std::string beatMessage;
+    std::string bestMessage;
     bool customNickname = false;
     std::string nickname;
     bool showDecimals = false;
@@ -38,6 +40,12 @@ struct GlobalCfg {
     bool defaultStepMode = false;
     int defaultMin = 0;
     int defaultMinRunProgress = 0;
+    bool noCaption = false;
+    bool skewShot = false;
+    int skewStrength = 60;
+    int completeDelayMs = 1200;
+    int deathDelayMs = 0;
+    int uploadTimeout = 45;
     bool operator==(GlobalCfg const&) const = default;
 };
 
@@ -46,17 +54,25 @@ struct RunEntry {
     std::string label;
 };
 
+// level key -> level name, so the list stays readable after the level is gone
+using Blacklist = std::map<std::string, std::string>;
+
 std::string spKey(float x);
-bool levelEnabled(int id);
-RunCfg loadRunCfg(int id, std::string const& run);
-void saveRunCfg(int id, std::string const& run, RunCfg cfg);
-LevelCfg loadLevelCfg(int id);
-void saveLevelCfg(int id, LevelCfg const& cfg);
+bool levelEnabled(LevelRef const& level);
+RunCfg loadRunCfg(LevelRef const& level, std::string const& run);
+void saveRunCfg(LevelRef const& level, std::string const& run, RunCfg cfg);
+LevelCfg loadLevelCfg(LevelRef const& level);
+void saveLevelCfg(LevelRef const& level, LevelCfg const& cfg);
 GlobalCfg loadGlobalCfg();
 void saveGlobalCfg(GlobalCfg const& cfg);
 int currentDecimalPlaces();
 std::vector<RunEntry> collectRunEntries(PlayLayer* layer);
 std::string formatTemplate(std::string text, std::string const& fallback,
     std::vector<std::pair<std::string, std::string>> const& variables);
+
+Blacklist loadBlacklist();
+bool isBlacklisted(std::string const& key);
+void setBlacklisted(LevelRef const& level, bool blacklisted);
+void removeFromBlacklist(std::string const& key);
 
 }

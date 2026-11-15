@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -31,11 +32,9 @@ constexpr size_t kMaxCaptions = 8;
 constexpr size_t kMaxCaptionBytes = 4096;
 constexpr size_t kMaxImageBytes = 32 * 1024 * 1024;
 constexpr size_t kMaxPNGBytes = 10 * 1024 * 1024;
-constexpr size_t kMaxUploadBatches = 4;
 constexpr size_t kMaxQueuedPNGBytes = 24 * 1024 * 1024;
 constexpr int kMaxDimension = 8192;
 std::mutex s_queueMutex;
-std::vector<std::string> s_pending;
 std::atomic_bool s_busy = false;
 
 // Held only through capture/encoding. Upload backpressure is independent, so
@@ -580,99 +579,130 @@ bool captureFramebuffer(Frame& frame, Caps const& caps) {
 }
 #endif
 
-struct SendBatch {
-    ByteVector png;
-    std::vector<std::string> captions;
-    size_t next = 0;
+// ======================= upload queue =======================
+constexpr size_t kMaxUploadJobs = 12;
+constexpr size_t kPhotoCaptionLimit = 1024; // Telegram sendPhoto caption limit
+
+std::atomic<size_t> s_queuedPNGBytes = 0;
+
+// Counts its own bytes for as long as any job still references it.
+struct QueuedPNG {
+    ByteVector data;
+    explicit QueuedPNG(ByteVector bytes) : data(std::move(bytes)) { s_queuedPNGBytes += data.size(); }
+    ~QueuedPNG() { s_queuedPNGBytes -= data.size(); }
 };
 
-// Includes the active batch: at most four stored PNGs and 24 MiB total. Only
-// one HTTP request (and its multipart copies) exists at a time. The worker
-// inserts completed PNGs under this mutex; transport runs on the main thread.
+struct UploadJob {
+    std::shared_ptr<QueuedPNG const> png; // null: text message
+    std::string text;
+};
+
 std::mutex s_uploadMutex;
-std::deque<std::shared_ptr<SendBatch>> s_uploads;
-size_t s_uploadBytes = 0;
+std::deque<UploadJob> s_jobs;
 bool s_uploadActive = false;
+
+size_t freePNGBudget() {
+    return kMaxQueuedPNGBytes - std::min(s_queuedPNGBytes.load(), kMaxQueuedPNGBytes);
+}
 
 void sendToTelegram();
 
-void uploadFinished(bool discardBatch) {
+void uploadFinished() {
     {
         std::lock_guard lock(s_uploadMutex);
-        if (!s_uploads.empty()) {
-            auto const& batch = s_uploads.front();
-            if (discardBatch || batch->next >= batch->captions.size()) {
-                s_uploadBytes -= batch->png.size();
-                s_uploads.pop_front();
-            }
-        }
         s_uploadActive = false;
     }
     sendToTelegram();
 }
 
-// Transport stays private to this module. Slow network delivery retains only
-// this bounded queue; captured pixels/captions are never deferred to a new frame.
+// One HTTP request at a time, always on the main thread.
 void sendToTelegram() {
-    std::shared_ptr<SendBatch> batch;
+    UploadJob job;
     {
         std::lock_guard lock(s_uploadMutex);
-        if (s_uploadActive || s_uploads.empty()) return;
+        if (s_uploadActive || s_jobs.empty()) return;
         s_uploadActive = true;
-        batch = s_uploads.front();
+        job = std::move(s_jobs.front());
+        s_jobs.pop_front();
     }
     try {
+        auto mod = Mod::get();
         auto token = std::string(utils::string::trim(tg::botToken()));
-        auto chat = std::string(utils::string::trim(Mod::get()->getSettingValue<std::string>("chat-id")));
+        auto chat = std::string(utils::string::trim(mod->getSettingValue<std::string>("chat-id")));
         if (token.starts_with("bot")) token = token.substr(3);
-        if (token.empty() || chat.empty() || batch->next >= batch->captions.size()) {
-            uploadFinished(true);
+        if (token.empty() || chat.empty()) {
+            uploadFinished();
             return;
         }
+        auto timeout = std::clamp<int64_t>(mod->getSettingValue<int64_t>("upload-timeout"), 5, 120);
         web::MultipartForm form;
         form.param("chat_id", chat);
-        form.param("caption", batch->captions[batch->next++]);
-        form.file("photo", batch->png, "shot.png", "image/png");
+        char const* method = "sendMessage";
+        if (job.png) {
+            method = "sendPhoto";
+            if (!job.text.empty()) form.param("caption", job.text);
+            form.file("photo", job.png->data, "shot.png", "image/png");
+        }
+        else form.param("text", job.text);
         auto req = web::WebRequest();
         req.bodyMultipart(form);
-        req.timeout(std::chrono::seconds(45));
-        async::spawn(req.post(fmt::format("https://api.telegram.org/bot{}/sendPhoto", token)),
-            [](web::WebResponse res) {
+        req.timeout(std::chrono::seconds(timeout));
+        async::spawn(req.post(fmt::format("https://api.telegram.org/bot{}/{}", token, method)),
+            [png = job.png](web::WebResponse res) {
                 try {
                     if (!res.ok()) {
                         // Do not log a URL/body that might contain a bot token.
-                        log::warn("Telegram screenshot upload failed (HTTP {})", res.code());
+                        log::warn("Telegram upload failed (HTTP {})", res.code());
                     }
                     else {
                         auto json = res.json();
                         if (!json || !json.unwrap()["ok"].asBool().unwrapOr(false))
-                            log::warn("Telegram rejected the screenshot or returned an invalid response");
+                            log::warn("Telegram rejected the message or returned an invalid response");
                     }
                 }
                 catch (std::exception const&) {
-                    log::warn("Could not inspect Telegram screenshot response");
+                    log::warn("Could not inspect Telegram response");
                 }
-                uploadFinished(false);
+                uploadFinished();
             });
     }
     catch (std::exception const&) {
-        log::warn("Screenshot upload could not be started; remaining batch captions dropped");
-        uploadFinished(true);
+        log::warn("Telegram upload could not be started; job dropped");
+        uploadFinished();
     }
 }
 
-bool enqueueUpload(std::shared_ptr<SendBatch> batch) {
+bool enqueueJobs(std::vector<UploadJob> jobs) {
     {
         std::lock_guard lock(s_uploadMutex);
-        if (s_uploads.size() >= kMaxUploadBatches || batch->png.size() > kMaxQueuedPNGBytes - s_uploadBytes) {
-            log::warn("Screenshot upload queue is full; encoded frame dropped");
+        if (s_jobs.size() + jobs.size() > kMaxUploadJobs) {
+            log::warn("Telegram upload queue is full; dropped");
             return false;
         }
-        s_uploads.push_back(batch);
-        s_uploadBytes += batch->png.size();
+        for (auto& job : jobs) s_jobs.push_back(std::move(job));
     }
     geode::queueInMainThread([] { sendToTelegram(); });
     return true;
+}
+
+// One PNG, one job per caption. Captions over the photo limit are sent as a
+// clean photo followed by a text message, so long stats are never rejected.
+void enqueuePhoto(ByteVector bytes, std::vector<std::string> captions, bool noCaption) {
+    if (bytes.size() > freePNGBudget()) {
+        log::warn("Telegram upload queue is full; encoded frame dropped");
+        return;
+    }
+    auto png = std::make_shared<QueuedPNG const>(std::move(bytes));
+    std::vector<UploadJob> jobs;
+    if (noCaption || captions.empty()) jobs.push_back({png, ""});
+    else for (auto& caption : captions) {
+        if (caption.size() <= kPhotoCaptionLimit) jobs.push_back({png, std::move(caption)});
+        else {
+            jobs.push_back({png, ""});
+            jobs.push_back({nullptr, std::move(caption)});
+        }
+    }
+    enqueueJobs(std::move(jobs));
 }
 
 struct TemporaryPNG {
@@ -684,7 +714,37 @@ struct TemporaryPNG {
     }
 };
 
-void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_ptr<BatchLease> lease) {
+// Read on the main thread only; the encoder thread never touches settings.
+struct EncodeOptions {
+    float skew = 0.f;
+    bool noCaption = false;
+};
+
+EncodeOptions currentEncodeOptions() {
+    auto mod = Mod::get();
+    EncodeOptions options;
+    if (mod->getSettingValue<bool>("skewed-screenshot")) {
+        options.skew = std::clamp((int)mod->getSettingValue<int64_t>("skew-strength"), 10, 400) / 100.f;
+    }
+    options.noCaption = mod->getSettingValue<bool>("no-caption");
+    return options;
+}
+
+// Joke mode: recreates the old row-pitch bug. Each row is rotated left a bit
+// more than the row above it, so the picture shears diagonally and wraps
+// around the edge. Whole pixels move, so colors stay intact.
+void applySkew(Frame& frame, float pixelsPerRow) {
+    size_t row = size_t(frame.width) * 4;
+    for (int y = 0; y < frame.height; ++y) {
+        auto shift = size_t(std::lround(y * pixelsPerRow)) % size_t(frame.width);
+        if (!shift) continue;
+        auto line = frame.pixels.begin() + size_t(y) * row;
+        std::rotate(line, line + shift * 4, line + row);
+    }
+}
+
+void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_ptr<BatchLease> lease,
+                   EncodeOptions options) {
     static uint64_t counter = 0; // render thread only
     auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     auto path = Mod::get()->getSaveDir() / fmt::format("shot-{}-{}.png", stamp, counter++);
@@ -694,10 +754,8 @@ void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_p
     auto image = std::shared_ptr<CCImage>(new CCImage(), [](CCImage* p) {
         geode::queueInMainThread([p] { p->release(); });
     });
-    auto batch = std::make_shared<SendBatch>();
-    batch->captions = std::move(captions);
     std::thread([frame = std::move(frame), path = std::move(path), image = std::move(image),
-        batch = std::move(batch), lease = std::move(lease)]() mutable {
+        captions = std::move(captions), lease = std::move(lease), options]() mutable {
         try {
             TemporaryPNG temporary{path};
             size_t row = size_t(frame.width) * 4;
@@ -706,6 +764,7 @@ void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_p
                 auto opposite = frame.pixels.begin() + size_t(frame.height - 1 - y) * row;
                 std::swap_ranges(first, first + row, opposite);
             }
+            if (options.skew > 0.f) applySkew(frame, options.skew);
             bool ok = image->initWithImageData(frame.pixels.data(), static_cast<int>(frame.pixels.size()),
                 CCImage::kFmtRawData, frame.width, frame.height, 8);
             // Drop the readback copy before PNG encoding allocates its buffers.
@@ -722,10 +781,8 @@ void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_p
             }
             auto data = file::readBinary(path);
             if (!data) { log::warn("Could not read encoded screenshot PNG"); return; }
-            batch->png = std::move(data).unwrap();
-            // Reserve queue memory before releasing the encoding slot, so
-            // delayed main-thread callbacks cannot accumulate uncounted PNGs.
-            enqueueUpload(std::move(batch));
+            // Reserve queue memory before releasing the encoding slot.
+            enqueuePhoto(std::move(data).unwrap(), std::move(captions), options.noCaption);
             image.reset();
             lease.reset();
         }
@@ -735,56 +792,147 @@ void encodeAndSend(Frame frame, std::vector<std::string> captions, std::shared_p
     }).detach();
 }
 
+// ======================= pending screenshots =======================
+constexpr size_t kMaxFallbackFrames = 2;
+
+struct PendingShot {
+    uint64_t id = 0;
+    std::string caption;
+    std::chrono::steady_clock::time_point due;
+    bool wantFallback = false; // delayed: also keep the frame of the moment it was queued
+    bool flushed = false;      // level restarted before the delay passed
+    std::optional<Frame> fallback;
+};
+
+std::vector<PendingShot> s_pending; // guarded by s_queueMutex
+uint64_t s_nextShotId = 0;
+
+bool captureFrame(Frame& frame) {
+    checkGL("pre-existing state");
+    Caps caps;
+    bool ok = caps.init();
+#ifdef GEODE_IS_ANDROID
+    if (ok) ok = captureScene(frame, caps);
+#else
+    if (ok) ok = captureFramebuffer(frame, caps);
+#endif
+    // Guards have now restored the context, even when capture failed.
+    if (!checkGL("state restoration")) ok = false;
+    if (!ok) log::warn("Screenshot capture failed or exceeded limits; frame dropped");
+    return ok;
+}
+
+void encode(Frame frame, std::vector<std::string> captions) {
+    s_busy.store(true);
+    std::shared_ptr<BatchLease> lease;
+    try { lease = std::make_shared<BatchLease>(); }
+    catch (...) { s_busy.store(false); throw; }
+    encodeAndSend(std::move(frame), std::move(captions), std::move(lease), currentEncodeOptions());
+}
+
+void storeFallbacks(std::vector<uint64_t> const& ids, Frame const& frame) {
+    std::lock_guard lock(s_queueMutex);
+    size_t stored = std::count_if(s_pending.begin(), s_pending.end(),
+        [](PendingShot const& shot) { return shot.fallback.has_value(); });
+    for (auto& shot : s_pending) {
+        if (stored >= kMaxFallbackFrames) break;
+        if (shot.fallback || std::find(ids.begin(), ids.end(), shot.id) == ids.end()) continue;
+        shot.fallback = frame;
+        ++stored;
+    }
+}
+
 void capturePending() {
+    // The previous frame is still encoding: keep the queue and retry next frame.
+    if (s_busy.load()) return;
+    auto now = std::chrono::steady_clock::now();
+    std::optional<Frame> restartFrame;
     std::vector<std::string> captions;
+    std::vector<uint64_t> fallbackIds;
     {
         std::lock_guard lock(s_queueMutex);
         if (s_pending.empty()) return;
-        captions.swap(s_pending);
-    }
-    if (s_busy.exchange(true)) {
-        log::warn("Screenshot batch dropped: previous frame is still being encoded");
-        return;
+        auto flushed = std::find_if(s_pending.begin(), s_pending.end(),
+            [](PendingShot const& shot) { return shot.flushed && shot.fallback; });
+        if (flushed != s_pending.end()) {
+            restartFrame = std::move(flushed->fallback);
+            captions.push_back(std::move(flushed->caption));
+            s_pending.erase(flushed);
+        }
+        else {
+            for (auto it = s_pending.begin(); it != s_pending.end();) {
+                if (it->due <= now) {
+                    captions.push_back(std::move(it->caption));
+                    it = s_pending.erase(it);
+                    continue;
+                }
+                if (it->wantFallback && !it->fallback) {
+                    fallbackIds.push_back(it->id);
+                    it->wantFallback = false; // one attempt per shot
+                }
+                ++it;
+            }
+        }
     }
     try {
-        auto lease = std::make_shared<BatchLease>();
-        checkGL("pre-existing state");
-        Caps caps;
+        if (restartFrame) {
+            encode(std::move(*restartFrame), std::move(captions));
+            return;
+        }
+        if (captions.empty() && fallbackIds.empty()) return;
         Frame frame;
-        bool ok = caps.init();
-#ifdef GEODE_IS_ANDROID
-        if (ok) ok = captureScene(frame, caps);
-#else
-        if (ok) ok = captureFramebuffer(frame, caps);
-#endif
-        // Guards have now restored the context, even when capture failed.
-        if (!checkGL("state restoration")) ok = false;
-        if (!ok) { log::warn("Screenshot capture failed or exceeded limits; frame dropped"); return; }
-        encodeAndSend(std::move(frame), std::move(captions), std::move(lease));
+        if (!captureFrame(frame)) return;
+        if (!fallbackIds.empty()) storeFallbacks(fallbackIds, frame);
+        if (!captions.empty()) encode(std::move(frame), std::move(captions));
     }
     catch (std::exception const&) {
-        s_busy.store(false);
         log::warn("Screenshot capture could not be allocated or scheduled; frame dropped");
     }
 }
 } // namespace
 
-void tg::queueScreenshot(std::string caption) {
-    if (caption.size() > kMaxCaptionBytes) {
+void tg::queueScreenshot(ShotRequest request) {
+    if (request.caption.size() > kMaxCaptionBytes) {
         log::warn("Screenshot caption exceeds queue size limit; dropped");
         return;
     }
+    int delay = std::clamp(request.delayMs, 0, 5000);
     std::lock_guard lock(s_queueMutex);
     if (s_pending.size() >= kMaxCaptions) {
-        log::warn("Screenshot caption queue is full; dropped");
+        log::warn("Screenshot queue is full; dropped");
         return;
     }
     try {
-        s_pending.push_back(std::move(caption));
+        PendingShot shot;
+        shot.id = ++s_nextShotId;
+        shot.caption = std::move(request.caption);
+        shot.due = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay);
+        shot.wantFallback = delay > 0;
+        s_pending.push_back(std::move(shot));
     }
     catch (std::exception const&) {
-        log::warn("Screenshot caption could not be queued; dropped");
+        log::warn("Screenshot could not be queued; dropped");
     }
+}
+
+void tg::flushDelayedScreenshots() {
+    std::lock_guard lock(s_queueMutex);
+    auto now = std::chrono::steady_clock::now();
+    for (auto& shot : s_pending) {
+        if (shot.due <= now) continue;
+        if (shot.fallback) shot.flushed = true;
+        // Death and restart in the same frame: no earlier frame exists, so
+        // capture as soon as possible instead of losing the message.
+        else shot.due = now;
+    }
+}
+
+void tg::sendTelegramText(std::string text) {
+    if (text.empty()) return;
+    if (text.size() > kMaxCaptionBytes) text.resize(kMaxCaptionBytes);
+    std::vector<UploadJob> jobs;
+    jobs.push_back({nullptr, std::move(text)});
+    enqueueJobs(std::move(jobs));
 }
 
 #ifdef GEODE_IS_ANDROID

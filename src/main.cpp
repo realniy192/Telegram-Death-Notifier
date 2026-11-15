@@ -18,16 +18,23 @@ static std::string nickname() {
     return name.empty() ? "Player" : name;
 }
 
+static int intSetting(char const* key, int min, int max) {
+    return std::clamp((int)Mod::get()->getSettingValue<int64_t>(key), min, max);
+}
+
 static std::optional<std::string> g_pendingWin;
 
 // ======================= gameplay =======================
 class $modify(TGPlayLayer, PlayLayer) {
     struct Fields {
         tg::RunTracking run;
+        tg::LevelRef ref;
         bool resetting = false;
         bool restoredCheckpoint = false;
         bool handlingCollision = false;
     };
+
+    enum class Kind { Death, Best, Run, Beat };
 
     static void onModify(auto& self) {
         // run before other mods (noclip hacks) so we see every death
@@ -36,15 +43,29 @@ class $modify(TGPlayLayer, PlayLayer) {
         }
     }
 
+    // Read on every event, so toggling the blacklist mid-level applies at once.
+    bool ignored() {
+        return tg::isBlacklisted(m_fields->ref.key);
+    }
+
     tg::RunFilters currentFilters() {
-        auto level = tg::loadLevelCfg(m_level->m_levelID.value());
+        auto const& ref = m_fields->ref;
+        auto level = tg::loadLevelCfg(ref);
         std::string key = m_startPosObject ? tg::spKey(m_startPosObject->getPositionX()) : "zero";
-        auto cfg = tg::loadRunCfg(m_level->m_levelID.value(), key);
+        auto cfg = tg::loadRunCfg(ref, key);
         return { level.enabled, level.mode, cfg.enabled, cfg.minPercent, level.minRunProgress,
                  Mod::get()->getSettingValue<bool>("only-best") };
     }
 
-    std::string runCaption(tg::RunResult const& run, bool completed) {
+    Kind captionKind(tg::RunResult const& run, bool completed, int previousBest) {
+        if (run.start > 0 || run.fromCheckpoint || m_isPracticeMode) return Kind::Run;
+        if (completed) return Kind::Beat;
+        // GD stores bests as whole percents: 54.32% does not beat a 54% best.
+        if (run.end / run.scale() > previousBest) return Kind::Best;
+        return Kind::Death;
+    }
+
+    std::string runCaption(tg::RunResult const& run, bool completed, int previousBest) {
         auto vars = std::vector<std::pair<std::string, std::string>> {
             { "player", nickname() }, { "level", std::string(m_level->m_levelName) },
             { "start", tg::formatPercent(run.start, run.decimalPlaces) },
@@ -53,28 +74,37 @@ class $modify(TGPlayLayer, PlayLayer) {
         };
         char const* setting;
         char const* fallback;
-        if (run.start > 0 || run.fromCheckpoint || m_isPracticeMode) {
-            setting = "msg-run";
-            fallback = "{player} got a {start}-{end}% run on {level}.";
-        }
-        else if (completed) {
-            setting = "msg-beat";
-            fallback = "{player} beat {level}!";
-        }
-        else {
-            setting = "msg-death";
-            fallback = "{player} died at {percent}% on {level}.";
+        switch (captionKind(run, completed, previousBest)) {
+            case Kind::Run:
+                setting = "msg-run";
+                fallback = "{player} got a {start}-{end}% run on {level}.";
+                break;
+            case Kind::Beat:
+                setting = "msg-beat";
+                fallback = "{player} beat {level}!";
+                break;
+            case Kind::Best:
+                setting = "msg-best";
+                fallback = "{player} got a new best of {percent}% on {level}!";
+                break;
+            default:
+                setting = "msg-death";
+                fallback = "{player} died at {percent}% on {level}.";
+                break;
         }
         return tg::formatTemplate(Mod::get()->getSettingValue<std::string>(setting), fallback, vars);
     }
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        m_fields->ref = tg::LevelRef::from(level);
         m_fields->run.restart(this->getCurrentPercent(), m_fields->run.fromCheckpoint);
         return true;
     }
 
     void resetLevel() {
+        // A delayed death shot must show the death, not the next attempt.
+        tg::flushDelayedScreenshots();
         m_fields->resetting = true;
         m_fields->restoredCheckpoint = false;
         g_pendingWin.reset();
@@ -82,6 +112,11 @@ class $modify(TGPlayLayer, PlayLayer) {
         // Keep the exact percent recorded inside loadFromCheckpoint.
         if (!m_fields->restoredCheckpoint) m_fields->run.restart(this->getCurrentPercent());
         m_fields->resetting = false;
+    }
+
+    void onQuit() {
+        tg::flushDelayedScreenshots();
+        PlayLayer::onQuit();
     }
 
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
@@ -93,17 +128,19 @@ class $modify(TGPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
-        if (obj == m_anticheatSpike || m_fields->resetting || m_fields->handlingCollision) {
+        if (obj == m_anticheatSpike || m_fields->resetting || m_fields->handlingCollision || ignored()) {
             PlayLayer::destroyPlayer(player, obj);
             return;
         }
         m_fields->handlingCollision = true;
         auto filters = currentFilters();
         double percent = this->getCurrentPercent();
+        // Read before the original call: GD updates the best inside it.
+        int previousBest = m_level->m_normalPercent.value();
         auto result = m_fields->run.collide(percent, tg::currentDecimalPlaces(), m_gameState.m_levelTime);
         std::optional<std::string> caption;
-        if (result && tg::shouldNotify(*result, filters, m_level->m_normalPercent.value(), m_isPracticeMode, false)) {
-            caption = runCaption(*result, false);
+        if (result && tg::shouldNotify(*result, filters, previousBest, m_isPracticeMode, false)) {
+            caption = runCaption(*result, false, previousBest);
         }
         PlayLayer::destroyPlayer(player, obj);
         bool actuallyDead = (player && player->m_isDead) || (m_player1 && m_player1->m_isDead) ||
@@ -112,15 +149,23 @@ class $modify(TGPlayLayer, PlayLayer) {
             m_fields->run.continueAfterCollision(percent);
         }
         m_fields->handlingCollision = false;
-        if (caption) tg::queueScreenshot(std::move(*caption));
+        if (caption) {
+            tg::queueScreenshot(tg::ShotRequest{std::move(*caption), intSetting("death-delay-ms", 0, 1000)});
+        }
     }
 
     void levelComplete() {
+        if (ignored()) {
+            g_pendingWin.reset();
+            PlayLayer::levelComplete();
+            return;
+        }
+        int previousBest = m_level->m_normalPercent.value();
         auto run = m_fields->run.finish(100.0, tg::currentDecimalPlaces());
         if (run) {
             g_pendingWin.reset();
-            if (tg::shouldNotify(*run, currentFilters(), m_level->m_normalPercent.value(), m_isPracticeMode, true)) {
-                g_pendingWin = runCaption(*run, true);
+            if (tg::shouldNotify(*run, currentFilters(), previousBest, m_isPracticeMode, true)) {
+                g_pendingWin = runCaption(*run, true, previousBest);
             }
         }
         PlayLayer::levelComplete();
@@ -131,7 +176,10 @@ class $modify(TGPlayLayer, PlayLayer) {
 class $modify(TGEndLayer, EndLevelLayer) {
     void customSetup() {
         EndLevelLayer::customSetup();
-        if (g_pendingWin) this->scheduleOnce(schedule_selector(TGEndLayer::onTGShot), 1.2f);
+        if (!g_pendingWin) return;
+        // Lets the end screen animation finish before the capture.
+        float delay = intSetting("complete-delay-ms", 0, 5000) / 1000.f;
+        this->scheduleOnce(schedule_selector(TGEndLayer::onTGShot), delay);
     }
 
     void onTGShot(float) {

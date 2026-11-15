@@ -7,13 +7,16 @@
   },
   "id": "m3reana.tg-death-notifier",
   "name": "Telegram Death Notifier",
-  "version": "v1.1.0",
+  "version": "v1.2.0",
   "developer": "m3reana",
   "description": "Sends a death screenshot to a Telegram channel",
   "resources": {
     "sprites": [
       "resources/*.png"
     ]
+  },
+  "dependencies": {
+    "cvolton.level-id-api": "v2.0.0-beta.2"
   },
   "settings": {
     "runs-title": {
@@ -91,6 +94,13 @@
       "default": "{player} beat {level}!",
       "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
     },
+    "msg-best": {
+      "type": "string",
+      "name": "New best message",
+      "description": "New best from 0%. Placeholders: {player}, {percent}, {level}",
+      "default": "{player} got a new best of {percent}% on {level}!",
+      "filter": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}%!?.,:;'()[]-_+=*/@#&~^|<>"
+    },
     "custom-nickname": {
       "type": "bool",
       "name": "Use custom nickname",
@@ -129,6 +139,47 @@
       "name": "Only new bests",
       "description": "Start positions mode only: normal deaths from 0%. Does not restrict practice, checkpoint runs or minimum run progress.",
       "default": false
+    },
+    "no-caption": {
+      "type": "bool",
+      "name": "Send screenshots without text",
+      "default": false
+    },
+    "skewed-screenshot": {
+      "type": "bool",
+      "name": "Skewed screenshot",
+      "description": "Recreates the old diagonal render bug.",
+      "default": false
+    },
+    "skew-strength": {
+      "type": "int",
+      "name": "Skew strength",
+      "description": "Shift per row, in hundredths of a pixel.",
+      "default": 60,
+      "min": 10,
+      "max": 400,
+      "enable-if": "skewed-screenshot"
+    },
+    "complete-delay-ms": {
+      "type": "int",
+      "name": "Level complete screenshot delay (ms)",
+      "default": 1200,
+      "min": 0,
+      "max": 5000
+    },
+    "death-delay-ms": {
+      "type": "int",
+      "name": "Death screenshot delay (ms)",
+      "default": 0,
+      "min": 0,
+      "max": 1000
+    },
+    "upload-timeout": {
+      "type": "int",
+      "name": "Upload timeout (s)",
+      "default": 45,
+      "min": 5,
+      "max": 120
     }
   }
 }

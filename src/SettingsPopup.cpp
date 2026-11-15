@@ -2,12 +2,14 @@
 #include "Settings.hpp"
 
 #include <Geode/Geode.hpp>
+#include <Geode/ui/Notification.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/ScrollLayer.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/ui/NineSlice.hpp>
 #include <Geode/ui/TextArea.hpp>
 #include <functional>
+#include <set>
 
 using namespace geode::prelude;
 
@@ -20,6 +22,7 @@ constexpr char kMessageChars[] = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRS
 constexpr char kIdleTexture[] = "GJ_button_01.png";
 constexpr char kActiveTexture[] = "GJ_button_02.png";
 constexpr char kDangerTexture[] = "GJ_button_06.png";
+constexpr char kNeutralTexture[] = "GJ_button_04.png";
 constexpr char kIdleFont[] = "goldFont.fnt";
 constexpr char kActiveFont[] = "bigFont.fnt";
 // Native ButtonSprite height; smaller buttons are scaled down instead of squashed.
@@ -34,6 +37,10 @@ constexpr ccColor3B kPreviewColor = {230, 210, 175};
 constexpr ccColor3B kOkColor = {120, 230, 140};
 constexpr ccColor3B kWarnColor = {255, 205, 90};
 constexpr ccColor3B kErrorColor = {255, 110, 110};
+
+// Page order. Stage 3 inserts a Stats tab right after Runs.
+enum Tab { TabRuns, TabTelegram, TabMessages, TabExtra, kTabCount };
+constexpr char const* kTabTitles[kTabCount] = {"Runs", "Telegram", "Messages", "Extra"};
 
 ScrollLayer* parentScroll(CCNode* node) {
     for (auto parent = node->getParent(); parent; parent = parent->getParent()) {
@@ -81,6 +88,69 @@ public:
     }
 };
 
+// Replaces the quick popup: Escape used to close it without a clear answer.
+// Here Escape does nothing, the close button means Cancel, and every choice
+// is explicit. The callback always runs exactly once.
+class ConfirmClosePopup : public Popup {
+public:
+    enum class Choice { Cancel, Discard, Save };
+
+private:
+    std::function<void(Choice)> m_callback;
+    bool m_done = false;
+
+    void finish(Choice choice) {
+        if (m_done) return;
+        m_done = true;
+        auto callback = std::move(m_callback);
+        this->retain();
+        Popup::onClose(nullptr);
+        if (callback) callback(choice);
+        this->release();
+    }
+
+    void addButton(CCMenu* menu, char const* text, char const* texture, float x, SEL_MenuHandler callback) {
+        auto sprite = ButtonSprite::create(text, 70, true, kIdleFont, texture, kButtonHeight, .7f);
+        sprite->setScale(.8f);
+        auto item = CCMenuItemSpriteExtra::create(sprite, this, callback);
+        item->setPosition({x, 30.f});
+        menu->addChild(item);
+    }
+
+    bool init(std::function<void(Choice)> callback) {
+        constexpr float width = 290.f, height = 140.f;
+        if (!Popup::init(width, height)) return false;
+        m_callback = std::move(callback);
+        setTitle("Unsaved changes", "goldFont.fnt", .7f, 22.f);
+        auto text = CCLabelBMFont::create("Save your changes before closing?", "chatFont.fnt");
+        text->setScale(.8f);
+        text->setPosition({width / 2, 78.f});
+        m_mainLayer->addChild(text);
+        auto menu = CCMenu::create();
+        menu->setPosition({0, 0});
+        m_mainLayer->addChild(menu);
+        addButton(menu, "Cancel", kNeutralTexture, width / 2 - 92.f, menu_selector(ConfirmClosePopup::onCancel));
+        addButton(menu, "Discard", kDangerTexture, width / 2, menu_selector(ConfirmClosePopup::onDiscard));
+        addButton(menu, "Save", kIdleTexture, width / 2 + 92.f, menu_selector(ConfirmClosePopup::onSave));
+        return true;
+    }
+
+public:
+    void onCancel(CCObject*) { finish(Choice::Cancel); }
+    void onDiscard(CCObject*) { finish(Choice::Discard); }
+    void onSave(CCObject*) { finish(Choice::Save); }
+    void onClose(CCObject*) override { finish(Choice::Cancel); }
+    // Escape must never decide for the user.
+    void keyBackClicked() override {}
+
+    static ConfirmClosePopup* create(std::function<void(Choice)> callback) {
+        auto popup = new ConfirmClosePopup();
+        if (popup->init(std::move(callback))) { popup->autorelease(); return popup; }
+        delete popup;
+        return nullptr;
+    }
+};
+
 class SettingsPopup : public Popup {
     struct Page {
         ScrollLayer* scroll;
@@ -102,9 +172,14 @@ class SettingsPopup : public Popup {
         CCNode* active;
     };
 
-    int m_levelID = 0;
+    tg::LevelRef m_levelRef;
     tg::LevelCfg m_level, m_originalLevel;
     tg::GlobalCfg m_global, m_originalGlobal;
+    bool m_blacklistCurrent = false, m_originalBlacklistCurrent = false;
+    tg::Blacklist m_blacklist;
+    std::set<std::string> m_removedBlacklist;
+    std::vector<std::string> m_blacklistKeys;
+    std::map<std::string, Choice> m_blacklistRows;
     std::vector<tg::RunEntry> m_entries;
     std::vector<Page> m_pages;
     std::vector<Choice> m_tabs;
@@ -185,11 +260,15 @@ class SettingsPopup : public Popup {
         return item;
     }
 
-    Choice choiceButton(CCMenu* menu, std::string const& text, CCPoint pos, float width,
-                        float height, SEL_MenuHandler callback) {
-        auto idle = buttonSprite(text, width, height, kIdleFont, kIdleTexture, .65f);
-        auto active = buttonSprite(text, width, height, kActiveFont, kActiveTexture, .55f);
-        auto size = idle->getScaledContentSize();
+    // Two prebuilt looks (idle / selected), each with its own text and texture.
+    Choice makeChoice(CCMenu* menu, std::string const& idleText, std::string const& activeText,
+                      char const* idleTexture, CCPoint pos, float width, float height,
+                      SEL_MenuHandler callback) {
+        auto idle = buttonSprite(idleText, width, height, kIdleFont, idleTexture, .65f);
+        auto active = buttonSprite(activeText, width, height, kActiveFont, kActiveTexture, .55f);
+        auto idleSize = idle->getScaledContentSize();
+        auto activeSize = active->getScaledContentSize();
+        CCSize size{std::max(idleSize.width, activeSize.width), std::max(idleSize.height, activeSize.height)};
         auto holder = CCNode::create();
         holder->setContentSize(size);
         idle->setPosition(size / 2);
@@ -201,6 +280,11 @@ class SettingsPopup : public Popup {
         item->setPosition(pos);
         menu->addChild(item);
         return {item, idle, active};
+    }
+
+    Choice choiceButton(CCMenu* menu, std::string const& text, CCPoint pos, float width,
+                        float height, SEL_MenuHandler callback) {
+        return makeChoice(menu, text, text, kIdleTexture, pos, width, height, callback);
     }
 
     void setSelected(Choice const& choice, bool selected) {
@@ -290,7 +374,7 @@ class SettingsPopup : public Popup {
         page.cursor -= height + 6.f;
     }
 
-        // Yellow pill with a placeholder name inside. Returns its width.
+    // Yellow pill with a placeholder name inside. Returns its width.
     float chip(CCNode* parent, std::string const& text, float x, float y, float scale = .46f) {
         auto label = CCLabelBMFont::create(text.c_str(), "chatFont.fnt");
         label->setScale(scale);
@@ -445,6 +529,7 @@ class SettingsPopup : public Popup {
 
     bool dirty() const {
         if (!(m_global == m_originalGlobal) || !(m_level == m_originalLevel)) return true;
+        if (m_blacklistCurrent != m_originalBlacklistCurrent || !m_removedBlacklist.empty()) return true;
         for (auto const& field : m_numbers) {
             if (std::string(field.input->getString()) != std::to_string(*field.value)) return true;
         }
@@ -453,15 +538,18 @@ class SettingsPopup : public Popup {
 
     void changed() {
         bool isDirty = dirty();
-        m_dirty->setString(isDirty ? "Unsaved changes" : "All changes saved");
+        m_dirty->setString(isDirty ? "Unsaved changes - press Apply" : "All changes saved");
         m_dirty->setColor(isDirty ? kWarnColor : kOkColor);
         for (auto const& refresh : m_refresh) refresh();
         if (m_connection) {
             bool token = !utils::string::trim(m_global.token).empty();
             bool chat = !utils::string::trim(m_global.chat).empty();
+            bool telegramDirty = m_global.token != m_originalGlobal.token || m_global.chat != m_originalGlobal.chat;
             m_connection->setString(!token ? "Bot token is missing"
-                : !chat ? "Channel is missing" : "Unsaved changes - press Apply to save.");
-            m_connection->setColor(token && chat ? kOkColor : kErrorColor);
+                : !chat ? "Channel is missing"
+                : telegramDirty ? "Unsaved changes - press Apply to save."
+                : "Token and channel are saved.");
+            m_connection->setColor(!token || !chat ? kErrorColor : telegramDirty ? kWarnColor : kOkColor);
         }
         if (m_startButton) setSelected(*m_startButton, m_level.mode == tg::RunMode::StartPositions);
         if (m_stepButton) setSelected(*m_stepButton, m_level.mode == tg::RunMode::MinimumProgress);
@@ -472,12 +560,16 @@ class SettingsPopup : public Popup {
     }
 
     float runsHeight() const {
-        return std::max(240.f, 170.f + m_entries.size() * 32.f);
+        return std::max(290.f, 218.f + m_entries.size() * 32.f);
+    }
+
+    float extraHeight() const {
+        return 780.f + m_blacklist.size() * 32.f;
     }
 
     void layoutRuns() {
-        auto& page = m_pages[0];
-        float height = m_level.mode == tg::RunMode::MinimumProgress ? 250.f
+        auto& page = m_pages[TabRuns];
+        float height = m_level.mode == tg::RunMode::MinimumProgress ? 300.f
             : std::max(page.scroll->getContentHeight(), runsHeight());
         page.content->setPositionY(height - page.contentHeight);
         page.scroll->m_contentLayer->setContentHeight(height);
@@ -498,6 +590,8 @@ class SettingsPopup : public Popup {
     void buildRuns(Page& page, PlayLayer* layer) {
         section(page, std::string(layer->m_level->m_levelName), "This level only");
         toggle(page.content, "Enabled for this level", m_level.enabled, nextRow(page, 32.f));
+        toggle(page.content, "Blacklist this level", m_blacklistCurrent, nextRow(page, 32.f));
+        note(page, "*Blacklisted:*  nothing is sent or tracked on this level.", 16.f);
         spacer(page, 4.f);
 
         float y = nextRow(page, 34.f);
@@ -626,6 +720,8 @@ class SettingsPopup : public Popup {
         placeholders(page);
         textField(page, "Death message", m_global.deathMessage, kMessageChars);
         preview(page, m_global.deathMessage, "{player} died at {percent}% on {level}.", false);
+        textField(page, "New best message (from 0%)", m_global.bestMessage, kMessageChars);
+        preview(page, m_global.bestMessage, "{player} got a new best of {percent}% on {level}!", false);
         textField(page, "Run message (start pos / practice / noclip)", m_global.runMessage, kMessageChars);
         preview(page, m_global.runMessage, "{player} got a {start}-{end}% run on {level}.", true);
         textField(page, "Level complete message", m_global.beatMessage, kMessageChars);
@@ -650,6 +746,25 @@ class SettingsPopup : public Popup {
         toggle(page.content, "Only new bests", m_global.onlyBest, nextRow(page, 32.f));
         note(page, "Only a new best from [0%] is sent. Works only when *Start Positions* mode is enabled.");
         spacer(page, 6.f);
+        section(page, "Screenshots", "Shared by all levels");
+        toggle(page.content, "Send screenshots without text", m_global.noCaption, nextRow(page, 32.f));
+        note(page, "Only the picture is sent, with no caption.");
+        numberField(page.content, "Level complete delay (ms)", m_global.completeDelayMs,
+                    nextRow(page, 34.f), 0, 5000);
+        numberField(page.content, "Death screenshot delay (ms)", m_global.deathDelayMs,
+                    nextRow(page, 34.f), 0, 1000);
+        note(page, "If the level restarts first, the frame of the death is sent.");
+        numberField(page.content, "Upload timeout (s)", m_global.uploadTimeout,
+                    nextRow(page, 34.f), 5, 120);
+        spacer(page, 6.f);
+        section(page, "Fun");
+        toggle(page.content, "Skewed screenshot", m_global.skewShot, nextRow(page, 32.f));
+        numberField(page.content, "Skew strength (10-400)", m_global.skewStrength,
+                    nextRow(page, 34.f), 10, 400);
+        auto skew = m_numbers.back().input;
+        m_refresh.push_back([this, skew] { skew->setEnabled(m_global.skewShot); });
+        note(page, "Recreates the old diagonal render bug.  [60]  =  classic look.");
+        spacer(page, 6.f);
         section(page, "Defaults", "Levels without settings");
         toggle(page.content, "Enabled on new levels", m_global.defaultEnabled, nextRow(page, 32.f));
         toggle(page.content, "Default mode: minimum progress", m_global.defaultStepMode, nextRow(page, 32.f));
@@ -657,6 +772,36 @@ class SettingsPopup : public Popup {
         numberField(page.content, "Default minimum end %", m_global.defaultMin, nextRow(page, 34.f));
         numberField(page.content, "Default minimum run length %", m_global.defaultMinRunProgress, nextRow(page, 34.f));
         note(page, "Used only by levels you haven't set up yet.");
+        spacer(page, 6.f);
+        buildBlacklist(page);
+    }
+
+    // Other blacklisted levels; the current one is toggled on the Runs tab.
+    void buildBlacklist(Page& page) {
+        section(page, "Blacklist", "Ignored levels");
+        std::vector<std::pair<std::string, std::string>> rows;
+        for (auto const& [key, name] : m_blacklist) {
+            if (key != m_levelRef.key) rows.push_back({key, name});
+        }
+        if (rows.empty()) {
+            note(page, "No other blacklisted levels. Add this one on the *Runs* tab.");
+            return;
+        }
+        auto menu = PageMenu::create();
+        menu->setPosition({0, 0});
+        page.content->addChild(menu);
+        for (auto const& [key, name] : rows) {
+            float y = nextRow(page, 32.f);
+            card(page.content, y, 28.f);
+            auto title = label(page.content, name.empty() ? key : name, 12.f, y, .32f);
+            title->limitLabelWidth(m_width - 110.f, .32f, .2f);
+            auto row = makeChoice(menu, "Remove", "Removed", kDangerTexture, {m_width - 44.f, y},
+                70.f, 20.f, menu_selector(SettingsPopup::onBlacklistRemove));
+            row.button->setTag((int)m_blacklistKeys.size());
+            m_blacklistKeys.push_back(key);
+            m_blacklistRows.emplace(key, row);
+        }
+        note(page, "Removals are saved when you press *Apply*.");
     }
 
     bool validate() {
@@ -674,13 +819,24 @@ class SettingsPopup : public Popup {
 
     bool apply() {
         defocus();
+        bool hadChanges = dirty();
         if (!validate()) return false;
-        if (!(m_level == m_originalLevel)) tg::saveLevelCfg(m_levelID, m_level);
+        if (!(m_level == m_originalLevel)) tg::saveLevelCfg(m_levelRef, m_level);
         if (!(m_global == m_originalGlobal)) tg::saveGlobalCfg(m_global);
+        if (m_blacklistCurrent != m_originalBlacklistCurrent) tg::setBlacklisted(m_levelRef, m_blacklistCurrent);
+        for (auto const& key : m_removedBlacklist) {
+            tg::removeFromBlacklist(key);
+            if (auto row = m_blacklistRows.find(key); row != m_blacklistRows.end()) {
+                row->second.button->setEnabled(false);
+            }
+        }
+        m_removedBlacklist.clear();
         m_originalGlobal = m_global;
         m_originalLevel = m_level;
+        m_originalBlacklistCurrent = m_blacklistCurrent;
         for (auto const& field : m_numbers) field.input->setString(std::to_string(*field.value));
         changed();
+        if (hadChanges) Notification::create("Settings saved", NotificationIcon::Success)->show();
         return true;
     }
 
@@ -693,13 +849,16 @@ class SettingsPopup : public Popup {
         if (!Popup::init(width, height)) return false;
         if (m_closeBtn) m_closeBtn->setPosition(m_closeBtn->getPosition() + CCPoint{4.f, -4.f});
         m_width = width - 24.f;
-        m_levelID = layer->m_level->m_levelID.value();
+        m_levelRef = tg::LevelRef::from(layer->m_level);
         m_global = tg::loadGlobalCfg();
-        m_level = tg::loadLevelCfg(m_levelID);
+        m_level = tg::loadLevelCfg(m_levelRef);
+        m_blacklist = tg::loadBlacklist();
+        m_blacklistCurrent = m_blacklist.contains(m_levelRef.key);
         m_entries = tg::collectRunEntries(layer);
-        for (auto const& entry : m_entries) m_level.runs[entry.key] = tg::loadRunCfg(m_levelID, entry.key);
+        for (auto const& entry : m_entries) m_level.runs[entry.key] = tg::loadRunCfg(m_levelRef, entry.key);
         m_originalGlobal = m_global;
         m_originalLevel = m_level;
+        m_originalBlacklistCurrent = m_blacklistCurrent;
 
         setTitle("Telegram Death Notifier", "goldFont.fnt", .7f, 22.f);
         m_title->limitLabelWidth(width - 90.f, .7f, .3f);
@@ -711,18 +870,17 @@ class SettingsPopup : public Popup {
             menu_selector(SettingsPopup::onApply), 64.f, 24.f);
 
         // Tabs sit in their own row above the panel instead of overlapping it.
-        char const* titles[] = {"Runs", "Telegram", "Messages", "Extra"};
         auto tabs = PageMenu::create();
         tabs->setPosition({0, 0});
         m_mainLayer->addChild(tabs);
         // Compact, evenly spaced tab row centered under the title.
         float tabGap = 6.f;
-        float tabWidth = std::min(84.f, (m_width - tabGap * 3) / 4);
-        float rowWidth = tabWidth * 4 + tabGap * 3;
+        float tabWidth = std::min(84.f, (m_width - tabGap * (kTabCount - 1)) / kTabCount);
+        float rowWidth = tabWidth * kTabCount + tabGap * (kTabCount - 1);
         float rowStart = 12.f + (m_width - rowWidth) / 2;
         float tabY = height - 50.f;
-        for (int i = 0; i < 4; ++i) {
-            auto tab = choiceButton(tabs, titles[i],
+        for (int i = 0; i < kTabCount; ++i) {
+            auto tab = choiceButton(tabs, kTabTitles[i],
                 {rowStart + tabWidth / 2 + (tabWidth + tabGap) * i, tabY}, tabWidth, 22.f,
                 menu_selector(SettingsPopup::onTab));
             tab.button->setTag(i);
@@ -741,8 +899,12 @@ class SettingsPopup : public Popup {
         // Scroll area is inset so rows never touch the rounded panel edge.
         float inset = 4.f;
         float scrollHeight = viewHeight - inset * 2;
-        float heights[] = {runsHeight(), 250.f, 400.f, 380.f};
-        for (int i = 0; i < 4; ++i) {
+        float heights[kTabCount] = {};
+        heights[TabRuns] = runsHeight();
+        heights[TabTelegram] = 250.f;
+        heights[TabMessages] = 480.f;
+        heights[TabExtra] = extraHeight();
+        for (int i = 0; i < kTabCount; ++i) {
             auto scroll = ScrollLayer::create({m_width, scrollHeight});
             scroll->setPosition({12.f, panelBottom + inset});
             scroll->m_contentLayer->setContentSize({m_width, heights[i]});
@@ -754,11 +916,12 @@ class SettingsPopup : public Popup {
             m_mainLayer->addChild(scroll);
             m_pages.push_back({scroll, content, heights[i] - 2.f, heights[i]});
         }
-        buildRuns(m_pages[0], layer);
-        buildTelegram(m_pages[1]);
-        buildMessages(m_pages[2]);
-        buildExtra(m_pages[3]);
-        for (int i = 1; i < 4; ++i) {
+        buildRuns(m_pages[TabRuns], layer);
+        buildTelegram(m_pages[TabTelegram]);
+        buildMessages(m_pages[TabMessages]);
+        buildExtra(m_pages[TabExtra]);
+        for (int i = 0; i < kTabCount; ++i) {
+            if (i == TabRuns) continue; // laid out by layoutRuns()
             auto& page = m_pages[i];
             float usedHeight = page.contentHeight - page.cursor + 8.f;
             float pageHeight = std::max(page.scroll->getContentHeight(), usedHeight);
@@ -767,7 +930,7 @@ class SettingsPopup : public Popup {
             page.scroll->scrollToTop();
         }
         layoutRuns();
-        selectTab(0);
+        selectTab(TabRuns);
         changed();
         return true;
     }
@@ -775,13 +938,15 @@ class SettingsPopup : public Popup {
     void selectTab(int index) {
         defocus();
         m_activeTab = index;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kTabCount; ++i) {
             m_pages[i].scroll->setVisible(i == index);
             m_pages[i].scroll->setTouchEnabled(i == index);
             m_pages[i].scroll->enableScrollWheel(i == index);
             setSelected(m_tabs[i], i == index);
         }
     }
+
+    void closeNow() { Popup::onClose(nullptr); }
 
 public:
     void onTab(CCObject* sender) { selectTab(sender->getTag()); }
@@ -797,6 +962,14 @@ public:
         *m_toggleValues.at(index) = !m_toggles.at(index)->isToggled();
         changed();
     }
+    void onBlacklistRemove(CCObject* sender) {
+        auto const& key = m_blacklistKeys.at(sender->getTag());
+        bool removed = !m_removedBlacklist.contains(key);
+        if (removed) m_removedBlacklist.insert(key);
+        else m_removedBlacklist.erase(key);
+        setSelected(m_blacklistRows.at(key), removed);
+        changed();
+    }
     void onApply(CCObject*) { apply(); }
     void onClose(CCObject* sender) override {
         defocus();
@@ -804,12 +977,22 @@ public:
         if (m_confirming) return;
         m_confirming = true;
         this->retain();
-        createQuickPopup("Unsaved changes", "Save changes before closing?", "Discard", "Save",
-            [this](FLAlertLayer*, bool save) {
-                m_confirming = false;
-                if (!save || apply()) Popup::onClose(nullptr);
-                this->release();
-            });
+        auto confirm = ConfirmClosePopup::create([this](ConfirmClosePopup::Choice choice) {
+            m_confirming = false;
+            if (choice == ConfirmClosePopup::Choice::Save) {
+                if (apply()) closeNow();
+            }
+            else if (choice == ConfirmClosePopup::Choice::Discard) {
+                Notification::create("Changes discarded", NotificationIcon::None)->show();
+                closeNow();
+            }
+            this->release();
+        });
+        if (confirm) confirm->show();
+        else {
+            m_confirming = false;
+            this->release();
+        }
     }
     static SettingsPopup* create(PlayLayer* layer) {
         auto popup = new SettingsPopup();

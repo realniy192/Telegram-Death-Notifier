@@ -2,63 +2,103 @@
 #include "SecureTokenSetting.hpp"
 
 #include <Geode/Geode.hpp>
+#include <matjson/stl_serialize.hpp>
 #include <set>
 
 using namespace geode::prelude;
+
+namespace {
+constexpr char kBlacklistKey[] = "blacklist";
+
+std::string savedName(std::string const& level, std::string const& suffix) {
+    return fmt::format("lvl-{}-{}", level, suffix);
+}
+
+// New saves use the current key. Pre-1.2 saves are read as a fallback until
+// the level is saved again; nothing is written under the old key.
+template <class T>
+T readLevel(tg::LevelRef const& ref, std::string const& suffix, T fallback) {
+    auto mod = Mod::get();
+    auto name = savedName(ref.key, suffix);
+    if (mod->hasSavedValue(name)) return mod->getSavedValue<T>(name);
+    if (!ref.legacy.empty()) {
+        auto old = savedName(ref.legacy, suffix);
+        if (mod->hasSavedValue(old)) return mod->getSavedValue<T>(old);
+    }
+    return fallback;
+}
+
+int intSetting(char const* key, int min, int max) {
+    return std::clamp((int)Mod::get()->getSettingValue<int64_t>(key), min, max);
+}
+}
 
 std::string tg::spKey(float x) {
     return fmt::format("sp-{}", (int)std::round(x));
 }
 
-bool tg::levelEnabled(int id) {
-    return Mod::get()->getSavedValue<bool>(fmt::format("lvl-{}-on", id),
-        Mod::get()->getSettingValue<bool>("default-enabled"));
+bool tg::levelEnabled(LevelRef const& level) {
+    return readLevel<bool>(level, "on", Mod::get()->getSettingValue<bool>("default-enabled"));
 }
 
-tg::RunCfg tg::loadRunCfg(int id, std::string const& run) {
+tg::RunCfg tg::loadRunCfg(LevelRef const& level, std::string const& run) {
+    RunCfg cfg;
+    cfg.enabled = readLevel<bool>(level, run + "-on", true);
+    cfg.minPercent = std::clamp((int)readLevel<int64_t>(level, run + "-min",
+        Mod::get()->getSettingValue<int64_t>("default-min")), 0, 100);
+    return cfg;
+}
+
+void tg::saveRunCfg(LevelRef const& level, std::string const& run, RunCfg cfg) {
     auto mod = Mod::get();
-    auto base = fmt::format("lvl-{}-{}", id, run);
-    return { mod->getSavedValue<bool>(base + "-on", true),
-             std::clamp((int)mod->getSavedValue<int64_t>(base + "-min",
-                 mod->getSettingValue<int64_t>("default-min")), 0, 100) };
+    mod->setSavedValue(savedName(level.key, run + "-on"), cfg.enabled);
+    mod->setSavedValue<int64_t>(savedName(level.key, run + "-min"), cfg.minPercent);
 }
 
-void tg::saveRunCfg(int id, std::string const& run, RunCfg cfg) {
-    auto base = fmt::format("lvl-{}-{}", id, run);
-    Mod::get()->setSavedValue(base + "-on", cfg.enabled);
-    Mod::get()->setSavedValue<int64_t>(base + "-min", cfg.minPercent);
-}
-
-tg::LevelCfg tg::loadLevelCfg(int id) {
+tg::LevelCfg tg::loadLevelCfg(LevelRef const& level) {
     auto mod = Mod::get();
-    bool step = mod->getSavedValue<bool>(fmt::format("lvl-{}-step-mode", id),
-        mod->getSettingValue<bool>("run-progress-enabled"));
-    return { levelEnabled(id), step ? RunMode::MinimumProgress : RunMode::StartPositions,
-             std::clamp((int)mod->getSavedValue<int64_t>(fmt::format("lvl-{}-step-min", id),
-                 mod->getSettingValue<int64_t>("minimum-run-progress")), 0, 100), {} };
+    LevelCfg cfg;
+    cfg.enabled = levelEnabled(level);
+    bool step = readLevel<bool>(level, "step-mode", mod->getSettingValue<bool>("run-progress-enabled"));
+    cfg.mode = step ? RunMode::MinimumProgress : RunMode::StartPositions;
+    cfg.minRunProgress = std::clamp((int)readLevel<int64_t>(level, "step-min",
+        mod->getSettingValue<int64_t>("minimum-run-progress")), 0, 100);
+    return cfg;
 }
 
-void tg::saveLevelCfg(int id, LevelCfg const& cfg) {
+void tg::saveLevelCfg(LevelRef const& level, LevelCfg const& cfg) {
     auto mod = Mod::get();
-    mod->setSavedValue(fmt::format("lvl-{}-on", id), cfg.enabled);
-    mod->setSavedValue(fmt::format("lvl-{}-step-mode", id), cfg.mode == RunMode::MinimumProgress);
-    mod->setSavedValue<int64_t>(fmt::format("lvl-{}-step-min", id), cfg.minRunProgress);
-    for (auto const& [key, run] : cfg.runs) saveRunCfg(id, key, run);
+    mod->setSavedValue(savedName(level.key, "on"), cfg.enabled);
+    mod->setSavedValue(savedName(level.key, "step-mode"), cfg.mode == RunMode::MinimumProgress);
+    mod->setSavedValue<int64_t>(savedName(level.key, "step-min"), cfg.minRunProgress);
+    for (auto const& [key, run] : cfg.runs) saveRunCfg(level, key, run);
 }
 
 tg::GlobalCfg tg::loadGlobalCfg() {
     auto mod = Mod::get();
-    return { botToken(), mod->getSettingValue<std::string>("chat-id"),
-             mod->getSettingValue<std::string>("msg-death"),
-             mod->getSettingValue<std::string>("msg-run"),
-             mod->getSettingValue<std::string>("msg-beat"),
-             mod->getSettingValue<bool>("custom-nickname"), mod->getSettingValue<std::string>("nickname"),
-             mod->getSettingValue<bool>("show-decimals"),
-             std::clamp((int)mod->getSettingValue<int64_t>("decimal-places"), 1, 4),
-             mod->getSettingValue<bool>("only-best"), mod->getSettingValue<bool>("default-enabled"),
-             mod->getSettingValue<bool>("run-progress-enabled"),
-             (int)mod->getSettingValue<int64_t>("default-min"),
-             (int)mod->getSettingValue<int64_t>("minimum-run-progress") };
+    GlobalCfg cfg;
+    cfg.token = botToken();
+    cfg.chat = mod->getSettingValue<std::string>("chat-id");
+    cfg.deathMessage = mod->getSettingValue<std::string>("msg-death");
+    cfg.runMessage = mod->getSettingValue<std::string>("msg-run");
+    cfg.beatMessage = mod->getSettingValue<std::string>("msg-beat");
+    cfg.bestMessage = mod->getSettingValue<std::string>("msg-best");
+    cfg.customNickname = mod->getSettingValue<bool>("custom-nickname");
+    cfg.nickname = mod->getSettingValue<std::string>("nickname");
+    cfg.showDecimals = mod->getSettingValue<bool>("show-decimals");
+    cfg.decimalPlaces = intSetting("decimal-places", 1, 4);
+    cfg.onlyBest = mod->getSettingValue<bool>("only-best");
+    cfg.defaultEnabled = mod->getSettingValue<bool>("default-enabled");
+    cfg.defaultStepMode = mod->getSettingValue<bool>("run-progress-enabled");
+    cfg.defaultMin = intSetting("default-min", 0, 100);
+    cfg.defaultMinRunProgress = intSetting("minimum-run-progress", 0, 100);
+    cfg.noCaption = mod->getSettingValue<bool>("no-caption");
+    cfg.skewShot = mod->getSettingValue<bool>("skewed-screenshot");
+    cfg.skewStrength = intSetting("skew-strength", 10, 400);
+    cfg.completeDelayMs = intSetting("complete-delay-ms", 0, 5000);
+    cfg.deathDelayMs = intSetting("death-delay-ms", 0, 1000);
+    cfg.uploadTimeout = intSetting("upload-timeout", 5, 120);
+    return cfg;
 }
 
 void tg::saveGlobalCfg(GlobalCfg const& cfg) {
@@ -68,6 +108,7 @@ void tg::saveGlobalCfg(GlobalCfg const& cfg) {
     mod->setSettingValue<std::string>("msg-death", cfg.deathMessage);
     mod->setSettingValue<std::string>("msg-run", cfg.runMessage);
     mod->setSettingValue<std::string>("msg-beat", cfg.beatMessage);
+    mod->setSettingValue<std::string>("msg-best", cfg.bestMessage);
     mod->setSettingValue<bool>("custom-nickname", cfg.customNickname);
     mod->setSettingValue<std::string>("nickname", cfg.nickname);
     mod->setSettingValue<bool>("show-decimals", cfg.showDecimals);
@@ -77,12 +118,17 @@ void tg::saveGlobalCfg(GlobalCfg const& cfg) {
     mod->setSettingValue<bool>("run-progress-enabled", cfg.defaultStepMode);
     mod->setSettingValue<int64_t>("default-min", cfg.defaultMin);
     mod->setSettingValue<int64_t>("minimum-run-progress", cfg.defaultMinRunProgress);
+    mod->setSettingValue<bool>("no-caption", cfg.noCaption);
+    mod->setSettingValue<bool>("skewed-screenshot", cfg.skewShot);
+    mod->setSettingValue<int64_t>("skew-strength", cfg.skewStrength);
+    mod->setSettingValue<int64_t>("complete-delay-ms", cfg.completeDelayMs);
+    mod->setSettingValue<int64_t>("death-delay-ms", cfg.deathDelayMs);
+    mod->setSettingValue<int64_t>("upload-timeout", cfg.uploadTimeout);
 }
 
 int tg::currentDecimalPlaces() {
     auto mod = Mod::get();
-    return mod->getSettingValue<bool>("show-decimals")
-        ? std::clamp((int)mod->getSettingValue<int64_t>("decimal-places"), 1, 4) : 0;
+    return mod->getSettingValue<bool>("show-decimals") ? intSetting("decimal-places", 1, 4) : 0;
 }
 
 std::vector<tg::RunEntry> tg::collectRunEntries(PlayLayer* layer) {
@@ -111,4 +157,26 @@ std::string tg::formatTemplate(std::string text, std::string const& fallback,
         }
     }
     return text;
+}
+
+tg::Blacklist tg::loadBlacklist() {
+    auto mod = Mod::get();
+    if (!mod->hasSavedValue(kBlacklistKey)) return {};
+    return mod->getSavedValue<Blacklist>(kBlacklistKey);
+}
+
+bool tg::isBlacklisted(std::string const& key) {
+    return loadBlacklist().contains(key);
+}
+
+void tg::setBlacklisted(LevelRef const& level, bool blacklisted) {
+    auto list = loadBlacklist();
+    if (blacklisted) list[level.key] = level.name;
+    else list.erase(level.key);
+    Mod::get()->setSavedValue(kBlacklistKey, list);
+}
+
+void tg::removeFromBlacklist(std::string const& key) {
+    auto list = loadBlacklist();
+    if (list.erase(key)) Mod::get()->setSavedValue(kBlacklistKey, list);
 }
