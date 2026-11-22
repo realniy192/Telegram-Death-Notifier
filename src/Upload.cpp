@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 
 using namespace geode::prelude;
@@ -35,11 +36,64 @@ struct QueuedPNG {
 struct UploadJob {
     std::shared_ptr<QueuedPNG const> png; // null: text message
     std::string text;
+    int attempts = 0; // HTTP 429 retries so far
 };
 
 std::mutex s_uploadMutex;
 std::deque<UploadJob> s_jobs;
 bool s_uploadActive = false;
+
+// Telegram allows about 20 posts a minute in one channel. Posting faster gets
+// HTTP 429 "retry after N"; the old code dropped those posts silently, so a
+// burst of quick runs only produced the first few posts.
+constexpr auto kMinGap = std::chrono::milliseconds(3100);
+constexpr int kMaxRetries = 3;
+std::chrono::steady_clock::time_point s_nextSend{}; // main thread only
+bool s_timerArmed = false;                           // main thread only
+
+void sendToTelegram();
+
+// One-shot main-thread timer that resumes the queue after a wait.
+class SendTimer : public CCObject {
+public:
+    static SendTimer* get() {
+        static SendTimer* timer = new SendTimer(); // lives for the whole game
+        return timer;
+    }
+    void fire(float) {
+        // Deferred: cocos unschedules this one-shot timer after fire() returns,
+        // so rescheduling from inside it would be lost.
+        geode::queueInMainThread([] {
+            s_timerArmed = false;
+            sendToTelegram();
+        });
+    }
+};
+
+void scheduleSend(std::chrono::steady_clock::duration wait) {
+    if (s_timerArmed) return;
+    s_timerArmed = true;
+    float seconds = std::max(.05f, std::chrono::duration<float>(wait).count());
+    CCDirector::get()->getScheduler()->scheduleSelector(
+        schedule_selector(SendTimer::fire), SendTimer::get(), 0.f, 0, seconds, false);
+}
+
+void requeueFront(UploadJob job) {
+    std::lock_guard lock(s_uploadMutex);
+    s_jobs.push_front(std::move(job));
+}
+
+int retryAfterSeconds(web::WebResponse& res) {
+    if (auto json = res.json()) {
+        auto value = json.unwrap();
+        if (value.contains("parameters") && value["parameters"].contains("retry_after")) {
+            if (auto seconds = value["parameters"]["retry_after"].asInt()) {
+                return std::clamp((int)seconds.unwrap(), 1, 300);
+            }
+        }
+    }
+    return 5;
+}
 
 size_t freePNGBudget() {
     return kMaxQueuedPNGBytes - std::min(s_queuedPNGBytes.load(), kMaxQueuedPNGBytes);
@@ -88,13 +142,23 @@ std::string failureReason(web::WebResponse& res) {
 // One HTTP request at a time, always on the main thread.
 void sendToTelegram() {
     UploadJob job;
+    std::optional<std::chrono::steady_clock::duration> wait;
     {
         std::lock_guard lock(s_uploadMutex);
         if (s_uploadActive || s_jobs.empty()) return;
-        s_uploadActive = true;
-        job = std::move(s_jobs.front());
-        s_jobs.pop_front();
+        auto now = std::chrono::steady_clock::now();
+        if (now < s_nextSend) wait = s_nextSend - now;
+        else {
+            s_uploadActive = true;
+            job = std::move(s_jobs.front());
+            s_jobs.pop_front();
+        }
     }
+    if (wait) {
+        scheduleSend(*wait);
+        return;
+    }
+    s_nextSend = std::chrono::steady_clock::now() + kMinGap;
     try {
         auto mod = Mod::get();
         auto token = std::string(utils::string::trim(tg::botToken()));
@@ -122,9 +186,23 @@ void sendToTelegram() {
         req.timeout(std::chrono::seconds(timeout));
         bool photo = job.png != nullptr;
         async::spawn(req.post(fmt::format("https://api.telegram.org/bot{}/{}", token, method)),
-            [png = job.png, photo](web::WebResponse res) {
+            [job = std::move(job), photo](web::WebResponse res) mutable {
                 try {
-                    if (!res.ok()) {
+                    if (res.code() == 429) {
+                        // Flood control: wait as long as Telegram asks, then retry.
+                        int seconds = retryAfterSeconds(res);
+                        log::warn("Telegram rate limit (HTTP 429), retry after {}s", seconds);
+                        s_nextSend = std::max(s_nextSend,
+                            std::chrono::steady_clock::now() + std::chrono::seconds(seconds));
+                        if (job.attempts < kMaxRetries) {
+                            ++job.attempts;
+                            requeueFront(std::move(job));
+                            tg::upload::notifyError(fmt::format(
+                                "Telegram is limiting posts, retrying in {}s", seconds));
+                        }
+                        else tg::upload::notifyError("Telegram post dropped: rate limited too many times");
+                    }
+                    else if (!res.ok()) {
                         // Do not log a URL/body that might contain a bot token.
                         log::warn("Telegram upload failed (HTTP {})", res.code());
                         tg::upload::notifyError(fmt::format("Telegram {} failed: {}",

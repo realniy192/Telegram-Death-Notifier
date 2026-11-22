@@ -41,7 +41,7 @@ std::string text(matjson::Value const& value, char const* key) {
 // Download URL of the release's .geode asset; prefers "<mod id>.geode".
 std::optional<std::string> findAsset(matjson::Value const& release) {
     if (!release.contains("assets") || !release["assets"].isArray()) return std::nullopt;
-    auto wanted = std::string(Mod::get()->getID()) + ".geode";
+    auto wanted = std::string(Mod::get()->getID().view()) + ".geode";
     std::optional<std::string> fallback;
     for (auto const& asset : release["assets"]) {
         auto name = text(asset, "name");
@@ -56,7 +56,7 @@ std::optional<std::string> findAsset(matjson::Value const& release) {
 std::filesystem::path installPath() {
     auto path = Mod::get()->getPackagePath();
     if (!path.empty()) return path;
-    return dirs::getModsDir() / (std::string(Mod::get()->getID()) + ".geode");
+    return dirs::getModsDir() / (std::string(Mod::get()->getID().view()) + ".geode");
 }
 
 void install(std::vector<uint8_t> const& data, std::string const& version) {
@@ -89,7 +89,7 @@ void install(std::vector<uint8_t> const& data, std::string const& version) {
         fmt::format("Version <cg>{}</c> is installed.\nRestart Geometry Dash to finish the update.", version),
         "Later", "Restart",
         [](FLAlertLayer*, bool restart) {
-            if (restart) game::restart();
+            if (restart) game::restart(true); // SDK 5.11.2 has no default argument
         });
 }
 
