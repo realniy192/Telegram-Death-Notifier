@@ -2,6 +2,7 @@
 
 #include "Level.hpp"
 #include "RunTracking.hpp"
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -9,6 +10,10 @@
 class PlayLayer;
 
 namespace tg {
+
+// "Post from this many in a row": 2 or more, no upper limit.
+constexpr int kStreakMinFloor = 2;
+constexpr int kStreakMinCeiling = std::numeric_limits<int>::max();
 
 struct RunCfg {
     bool enabled = true;
@@ -36,10 +41,6 @@ struct GlobalCfg {
     bool showDecimals = false;
     int decimalPlaces = 2;
     bool onlyBest = false;
-    bool defaultEnabled = false;
-    bool defaultStepMode = false;
-    int defaultMin = 0;
-    int defaultMinRunProgress = 0;
     bool noCaption = false;
     bool skewShot = false;
     int skewStrength = 60;
@@ -57,13 +58,19 @@ struct GlobalCfg {
 struct RunEntry {
     std::string key;
     std::string label;
+    int percent = 0; // where the start position sits, whole percent
 };
 
-// level key -> level name, so the list stays readable after the level is gone
-using Blacklist = std::map<std::string, std::string>;
+// Every level with posting switched on: level key -> level name, so the
+// Levels tab stays readable after the level is gone. Posting is strictly
+// opt-in: a level that is not in this list never posts.
+using EnabledLevels = std::map<std::string, std::string>;
 
 std::string spKey(float x);
 bool levelEnabled(LevelRef const& level);
+EnabledLevels loadEnabledLevels();
+// An empty name keeps the stored one.
+void setLevelEnabled(std::string const& key, std::string const& name, bool enabled);
 RunCfg loadRunCfg(LevelRef const& level, std::string const& run);
 void saveRunCfg(LevelRef const& level, std::string const& run, RunCfg cfg);
 LevelCfg loadLevelCfg(LevelRef const& level);
@@ -78,10 +85,5 @@ std::string playerName();
 std::vector<RunEntry> collectRunEntries(PlayLayer* layer);
 std::string formatTemplate(std::string text, std::string const& fallback,
     std::vector<std::pair<std::string, std::string>> const& variables);
-
-Blacklist loadBlacklist();
-bool isBlacklisted(std::string const& key);
-void setBlacklisted(LevelRef const& level, bool blacklisted);
-void removeFromBlacklist(std::string const& key);
 
 }

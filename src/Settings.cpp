@@ -8,7 +8,10 @@
 using namespace geode::prelude;
 
 namespace {
-constexpr char kBlacklistKey[] = "blacklist";
+// The only source of truth for "is posting on for this level". Older saves
+// also have lvl-<key>-on flags and a global default; both are ignored now,
+// so nothing is ever switched on without the user doing it.
+constexpr char kEnabledKey[] = "enabled-levels";
 constexpr char const* kStreakModes[] = {"Separate", "Replace", "Combine"};
 
 int streakModeIndex(std::string const& name) {
@@ -34,8 +37,9 @@ T readLevel(tg::LevelRef const& ref, std::string const& suffix, T fallback) {
     return fallback;
 }
 
+// Clamped as int64 first, so a huge value can't overflow the int cast.
 int intSetting(char const* key, int min, int max) {
-    return std::clamp((int)Mod::get()->getSettingValue<int64_t>(key), min, max);
+    return (int)std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>(key), min, max);
 }
 }
 
@@ -43,15 +47,31 @@ std::string tg::spKey(float x) {
     return fmt::format("sp-{}", (int)std::round(x));
 }
 
+tg::EnabledLevels tg::loadEnabledLevels() {
+    auto mod = Mod::get();
+    if (!mod->hasSavedValue(kEnabledKey)) return {};
+    return mod->getSavedValue<EnabledLevels>(kEnabledKey);
+}
+
 bool tg::levelEnabled(LevelRef const& level) {
-    return readLevel<bool>(level, "on", Mod::get()->getSettingValue<bool>("default-enabled"));
+    return !level.key.empty() && loadEnabledLevels().contains(level.key);
+}
+
+void tg::setLevelEnabled(std::string const& key, std::string const& name, bool enabled) {
+    if (key.empty()) return;
+    auto list = loadEnabledLevels();
+    if (enabled) {
+        auto& stored = list[key];
+        if (!name.empty()) stored = name;
+    }
+    else if (!list.erase(key)) return;
+    Mod::get()->setSavedValue(kEnabledKey, list);
 }
 
 tg::RunCfg tg::loadRunCfg(LevelRef const& level, std::string const& run) {
     RunCfg cfg;
     cfg.enabled = readLevel<bool>(level, run + "-on", true);
-    cfg.minPercent = std::clamp((int)readLevel<int64_t>(level, run + "-min",
-        Mod::get()->getSettingValue<int64_t>("default-min")), 0, 100);
+    cfg.minPercent = std::clamp((int)readLevel<int64_t>(level, run + "-min", 0), 0, 100);
     return cfg;
 }
 
@@ -62,19 +82,17 @@ void tg::saveRunCfg(LevelRef const& level, std::string const& run, RunCfg cfg) {
 }
 
 tg::LevelCfg tg::loadLevelCfg(LevelRef const& level) {
-    auto mod = Mod::get();
     LevelCfg cfg;
     cfg.enabled = levelEnabled(level);
-    bool step = readLevel<bool>(level, "step-mode", mod->getSettingValue<bool>("run-progress-enabled"));
+    bool step = readLevel<bool>(level, "step-mode", false);
     cfg.mode = step ? RunMode::MinimumProgress : RunMode::StartPositions;
-    cfg.minRunProgress = std::clamp((int)readLevel<int64_t>(level, "step-min",
-        mod->getSettingValue<int64_t>("minimum-run-progress")), 0, 100);
+    cfg.minRunProgress = std::clamp((int)readLevel<int64_t>(level, "step-min", 0), 0, 100);
     return cfg;
 }
 
 void tg::saveLevelCfg(LevelRef const& level, LevelCfg const& cfg) {
     auto mod = Mod::get();
-    mod->setSavedValue(savedName(level.key, "on"), cfg.enabled);
+    setLevelEnabled(level.key, level.name, cfg.enabled);
     mod->setSavedValue(savedName(level.key, "step-mode"), cfg.mode == RunMode::MinimumProgress);
     mod->setSavedValue<int64_t>(savedName(level.key, "step-min"), cfg.minRunProgress);
     for (auto const& [key, run] : cfg.runs) saveRunCfg(level, key, run);
@@ -94,10 +112,6 @@ tg::GlobalCfg tg::loadGlobalCfg() {
     cfg.showDecimals = mod->getSettingValue<bool>("show-decimals");
     cfg.decimalPlaces = intSetting("decimal-places", 1, 4);
     cfg.onlyBest = mod->getSettingValue<bool>("only-best");
-    cfg.defaultEnabled = mod->getSettingValue<bool>("default-enabled");
-    cfg.defaultStepMode = mod->getSettingValue<bool>("run-progress-enabled");
-    cfg.defaultMin = intSetting("default-min", 0, 100);
-    cfg.defaultMinRunProgress = intSetting("minimum-run-progress", 0, 100);
     cfg.noCaption = mod->getSettingValue<bool>("no-caption");
     cfg.skewShot = mod->getSettingValue<bool>("skewed-screenshot");
     cfg.skewStrength = intSetting("skew-strength", 10, 400);
@@ -105,7 +119,7 @@ tg::GlobalCfg tg::loadGlobalCfg() {
     cfg.deathDelayMs = intSetting("death-delay-ms", 0, 1000);
     cfg.uploadTimeout = intSetting("upload-timeout", 5, 120);
     cfg.streakEnabled = mod->getSettingValue<bool>("streak-enabled");
-    cfg.streakMin = intSetting("streak-min", 2, 20);
+    cfg.streakMin = intSetting("streak-min", kStreakMinFloor, kStreakMinCeiling);
     cfg.streakMode = streakModeIndex(mod->getSettingValue<std::string>("streak-mode"));
     cfg.streakSameMessage = mod->getSettingValue<std::string>("msg-streak-same");
     cfg.streakMixedMessage = mod->getSettingValue<std::string>("msg-streak-mixed");
@@ -125,10 +139,6 @@ void tg::saveGlobalCfg(GlobalCfg const& cfg) {
     mod->setSettingValue<bool>("show-decimals", cfg.showDecimals);
     mod->setSettingValue<int64_t>("decimal-places", cfg.decimalPlaces);
     mod->setSettingValue<bool>("only-best", cfg.onlyBest);
-    mod->setSettingValue<bool>("default-enabled", cfg.defaultEnabled);
-    mod->setSettingValue<bool>("run-progress-enabled", cfg.defaultStepMode);
-    mod->setSettingValue<int64_t>("default-min", cfg.defaultMin);
-    mod->setSettingValue<int64_t>("minimum-run-progress", cfg.defaultMinRunProgress);
     mod->setSettingValue<bool>("no-caption", cfg.noCaption);
     mod->setSettingValue<bool>("skewed-screenshot", cfg.skewShot);
     mod->setSettingValue<int64_t>("skew-strength", cfg.skewStrength);
@@ -166,11 +176,11 @@ std::vector<tg::RunEntry> tg::collectRunEntries(PlayLayer* layer) {
     for (auto obj : CCArrayExt<GameObject*>(layer->m_objects)) {
         if (obj && obj->m_objectID == 31) xs.insert((int)std::round(obj->getPositionX()));
     }
-    std::vector<RunEntry> entries { { "zero", "From 0%" } };
+    std::vector<RunEntry> entries { { "zero", "From 0%", 0 } };
     for (int x : xs) {
         int percent = layer->m_levelLength > 0
             ? std::clamp((int)(x / layer->m_levelLength * 100.f), 0, 100) : 0;
-        entries.push_back({ spKey((float)x), fmt::format("SP {}%", percent) });
+        entries.push_back({ spKey((float)x), fmt::format("SP {}%", percent), percent });
     }
     return entries;
 }
@@ -187,26 +197,4 @@ std::string tg::formatTemplate(std::string text, std::string const& fallback,
         }
     }
     return text;
-}
-
-tg::Blacklist tg::loadBlacklist() {
-    auto mod = Mod::get();
-    if (!mod->hasSavedValue(kBlacklistKey)) return {};
-    return mod->getSavedValue<Blacklist>(kBlacklistKey);
-}
-
-bool tg::isBlacklisted(std::string const& key) {
-    return loadBlacklist().contains(key);
-}
-
-void tg::setBlacklisted(LevelRef const& level, bool blacklisted) {
-    auto list = loadBlacklist();
-    if (blacklisted) list[level.key] = level.name;
-    else list.erase(level.key);
-    Mod::get()->setSavedValue(kBlacklistKey, list);
-}
-
-void tg::removeFromBlacklist(std::string const& key) {
-    auto list = loadBlacklist();
-    if (list.erase(key)) Mod::get()->setSavedValue(kBlacklistKey, list);
 }

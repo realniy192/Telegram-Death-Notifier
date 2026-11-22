@@ -13,8 +13,9 @@
 
 using namespace geode::prelude;
 
+// Clamped as int64 first, so a huge value can't overflow the int cast.
 static int intSetting(char const* key, int min, int max) {
-    return std::clamp((int)Mod::get()->getSettingValue<int64_t>(key), min, max);
+    return (int)std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>(key), min, max);
 }
 
 // Level complete post, taken on the end screen.
@@ -52,11 +53,8 @@ class $modify(TGPlayLayer, PlayLayer) {
         }
     }
 
-    // Read on every event, so toggling the blacklist mid-level applies at once.
-    bool ignored() {
-        return tg::isBlacklisted(m_fields->ref.key);
-    }
-
+    // Read on every event, so switching the level on or off mid-level applies at once.
+    // Posting is opt-in: levelEnabled is false unless the user turned this level on.
     tg::RunFilters currentFilters() {
         auto const& ref = m_fields->ref;
         auto level = tg::loadLevelCfg(ref);
@@ -158,7 +156,8 @@ class $modify(TGPlayLayer, PlayLayer) {
         if (!mod->getSettingValue<bool>("streak-enabled")) return std::nullopt;
         auto& streak = m_fields->streak;
         auto count = streak.push({ run.start, run.end, run.decimalPlaces, fromZero(run) });
-        if ((int)count < intSetting("streak-min", 2, 20)) return std::nullopt;
+        // No upper limit: any length from 2 up.
+        if (count < (size_t)intSetting("streak-min", tg::kStreakMinFloor, tg::kStreakMinCeiling)) return std::nullopt;
         auto vars = baseVars();
         vars.push_back({ "count", std::to_string(count) });
         vars.push_back({ "run", tg::StreakTracker::label(streak.entries.back(), false) });
@@ -221,15 +220,14 @@ class $modify(TGPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         m_fields->ref = tg::LevelRef::from(level);
         m_fields->run.restart(this->getCurrentPercent(), m_fields->run.fromCheckpoint);
-        if (!ignored()) {
-            tg::journal::beginVisit(m_fields->ref);
-            m_fields->journaling = true;
-            syncAttempts();
-            m_fields->snapshot = tg::stats::takeSnapshot(m_fields->ref);
-            m_fields->hasSnapshot = true;
-            // Existing history only sets the baseline; later improvements post.
-            tg::stats::initChain(m_fields->ref, levelData());
-        }
+        // Local stats only; nothing is posted unless the level is turned on.
+        tg::journal::beginVisit(m_fields->ref);
+        m_fields->journaling = true;
+        syncAttempts();
+        m_fields->snapshot = tg::stats::takeSnapshot(m_fields->ref);
+        m_fields->hasSnapshot = true;
+        // Existing history only sets the baseline; later improvements post.
+        tg::stats::initChain(m_fields->ref, levelData());
         return true;
     }
 
@@ -266,7 +264,7 @@ class $modify(TGPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
-        if (obj == m_anticheatSpike || m_fields->resetting || m_fields->handlingCollision || ignored()) {
+        if (obj == m_anticheatSpike || m_fields->resetting || m_fields->handlingCollision) {
             PlayLayer::destroyPlayer(player, obj);
             return;
         }
@@ -303,11 +301,6 @@ class $modify(TGPlayLayer, PlayLayer) {
     }
 
     void levelComplete() {
-        if (ignored()) {
-            g_pendingWin.reset();
-            PlayLayer::levelComplete();
-            return;
-        }
         int previousBest = m_level->m_normalPercent.value();
         auto run = m_fields->run.finish(100.0, tg::currentDecimalPlaces());
         if (run) {

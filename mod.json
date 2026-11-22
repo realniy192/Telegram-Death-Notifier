@@ -19,42 +19,10 @@
     "cvolton.level-id-api": "v2.0.0-beta.2"
   },
   "settings": {
-    "runs-title": {
-      "type": "title",
-      "name": "Runs - level defaults",
-      "description": "Configure the current level and choose Start positions or Minimum run progress in the pause-menu Runs tab. Defaults are used only where no setting is saved."
-    },
-    "default-enabled": {
-      "type": "bool",
-      "name": "Enable unconfigured levels",
-      "default": false
-    },
-    "run-progress-enabled": {
-      "type": "bool",
-      "name": "Default mode: minimum run progress",
-      "description": "Default for levels without a saved mode. Off selects Start positions. Choose the current level mode in the Runs tab; only the selected filter runs.",
-      "default": false
-    },
-    "default-min": {
-      "type": "int",
-      "name": "Default minimum end percent",
-      "default": 0,
-      "min": 0,
-      "max": 100,
-      "description": "Start positions mode: default endpoint threshold for rows not configured yet."
-    },
-    "minimum-run-progress": {
-      "type": "int",
-      "name": "Default minimum run progress (%)",
-      "description": "Default step for levels without their own threshold. Each collision ends a clean segment. Noclip can report multiple qualifying segments in one attempt. Zero adds no distance restriction.",
-      "default": 0,
-      "min": 0,
-      "max": 100,
-      "enable-if": "run-progress-enabled"
-    },
     "telegram-title": {
       "type": "title",
-      "name": "Telegram"
+      "name": "Telegram",
+      "description": "Posting is opt-in: turn it on per level in the pause-menu Runs tab."
     },
     "bot-token": {
       "type": "custom:masked-token",
@@ -124,10 +92,9 @@
     "streak-min": {
       "type": "int",
       "name": "Streak: post from",
-      "description": "How many progresses in a row start a streak.",
+      "description": "How many progresses in a row start a streak (2 or more, no upper limit).",
       "default": 2,
       "min": 2,
-      "max": 20,
       "enable-if": "streak-enabled"
     },
     "streak-mode": {
@@ -178,7 +145,7 @@
     "only-best": {
       "type": "bool",
       "name": "Only new bests",
-      "description": "Start positions mode only: normal deaths from 0%. Does not restrict practice, checkpoint runs or minimum run progress.",
+      "description": "Death % per start pos mode only: normal deaths from 0%. Does not restrict practice, checkpoint runs or run length mode.",
       "default": false
     },
     "no-caption": {
